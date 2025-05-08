@@ -15,9 +15,25 @@ import time
 from tqdm import tqdm
 import ssl
 import urllib.request
+import platform
 
 # Disable SSL certificate verification for downloading pre-trained weights
 ssl._create_default_https_context = ssl._create_unverified_context
+
+def get_device():
+    """
+    Get the appropriate device for training/inference
+    Prioritizes Apple Silicon GPU (MPS) if available, then CUDA, then CPU
+    """
+    if torch.backends.mps.is_available():
+        print("Using Apple Silicon GPU (MPS)")
+        return torch.device("mps")
+    elif torch.cuda.is_available():
+        print("Using CUDA GPU")
+        return torch.device("cuda")
+    else:
+        print("Using CPU")
+        return torch.device("cpu")
 
 class CSRNet(nn.Module):
     """
@@ -262,18 +278,25 @@ def main():
     parser.add_argument('--test-image', type=str, default=None, help='path to test image')
     parser.add_argument('--load-model', type=str, default=None, help='path to saved model')
     parser.add_argument('--image-size', type=int, default=384, help='input image size (default: 384)')
+    parser.add_argument('--num-workers', type=int, default=4, help='number of workers for data loading (default: 4)')
     args = parser.parse_args()
 
-    use_cuda = not args.no_cuda and torch.cuda.is_available()
+    # Set device
+    device = get_device()
+
+    # Set random seed for reproducibility
     torch.manual_seed(args.seed)
-    device = torch.device("cuda" if use_cuda else "cpu")
+    if device.type == 'cuda':
+        torch.cuda.manual_seed(args.seed)
+    elif device.type == 'mps':
+        torch.mps.manual_seed(args.seed)
 
     # Create model
     model = CSRNet(load_weights=True).to(device)
 
     # Load model if specified
     if args.load_model:
-        model.load_state_dict(torch.load(args.load_model))
+        model.load_state_dict(torch.load(args.load_model, map_location=device))
         print(f"Loaded model from {args.load_model}")
 
     if args.mode == 'train':
@@ -303,9 +326,22 @@ def main():
             target_size=target_size
         )
 
-        # Create data loaders
-        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
-        val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
+        # Create data loaders with appropriate number of workers
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=args.num_workers,
+            pin_memory=True if device.type != 'mps' else False  # MPS doesn't support pin_memory
+        )
+
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=True if device.type != 'mps' else False
+        )
 
         # Optimizer
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
