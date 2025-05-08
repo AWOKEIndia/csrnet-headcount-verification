@@ -456,6 +456,7 @@ def main():
             os.path.join(args.data_path, 'val', 'images'),
             os.path.join(args.data_path, 'val', 'density_maps'),
             transform=transforms.Compose([
+                transforms.Resize(target_size),
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
             ]),
@@ -484,7 +485,7 @@ def main():
         # Optimizer with gradient clipping
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=5, verbose=True
+            optimizer, mode='min', factor=0.5, patience=5
         )
         max_grad_norm = 1.0
 
