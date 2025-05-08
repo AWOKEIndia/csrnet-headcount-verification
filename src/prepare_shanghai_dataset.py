@@ -9,15 +9,73 @@ import shutil
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from pathlib import Path
+import torch
+import torch.nn.functional as F
+from torchvision import transforms
 
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.data_utils import create_density_map_gaussian, create_density_map_adaptive
 
-
-def prepare_shanghai_tech(dataset_path, output_path, part='A', use_adaptive=False, visualize=False):
+def get_device():
     """
-    Prepare ShanghaiTech dataset for CSRNet
+    Get the appropriate device for processing
+    Prioritizes Apple Silicon GPU (MPS) if available, then CUDA, then CPU
+    """
+    if torch.backends.mps.is_available():
+        print("Using Apple Silicon GPU (MPS)")
+        return torch.device("mps")
+    elif torch.cuda.is_available():
+        print("Using CUDA GPU")
+        return torch.device("cuda")
+    else:
+        print("Using CPU")
+        return torch.device("cpu")
+
+def gpu_create_density_map(points, height, width, sigma=4, device=None):
+    """
+    Create density map using GPU acceleration
+    """
+    if device is None:
+        device = get_device()
+
+    # Convert points to tensor
+    points_tensor = torch.tensor(points, dtype=torch.float32, device=device)
+
+    # Create coordinate grid
+    y_grid, x_grid = torch.meshgrid(
+        torch.arange(height, device=device),
+        torch.arange(width, device=device),
+        indexing='ij'
+    )
+
+    # Initialize density map
+    density_map = torch.zeros((height, width), device=device)
+
+    # Process points in batches to avoid memory issues
+    batch_size = 1000
+    for i in range(0, len(points), batch_size):
+        batch_points = points_tensor[i:i + batch_size]
+
+        # Calculate distances for all points in batch
+        for point in batch_points:
+            x, y = point[0], point[1]
+            if 0 <= x < width and 0 <= y < height:
+                # Calculate Gaussian kernel
+                gaussian = torch.exp(
+                    -((x_grid - x) ** 2 + (y_grid - y) ** 2) / (2 * sigma ** 2)
+                )
+                density_map += gaussian
+
+    # Normalize
+    if density_map.sum() > 0:
+        density_map = density_map / density_map.sum()
+
+    return density_map.cpu().numpy()
+
+def prepare_shanghai_tech(dataset_path, output_path, part='A', use_adaptive=False, visualize=False, use_gpu=True):
+    """
+    Prepare ShanghaiTech dataset for CSRNet with GPU acceleration
 
     Args:
         dataset_path (str): Path to ShanghaiTech dataset directory
@@ -25,11 +83,16 @@ def prepare_shanghai_tech(dataset_path, output_path, part='A', use_adaptive=Fals
         part (str): Dataset part, 'A' or 'B'
         use_adaptive (bool): Whether to use adaptive Gaussian kernels
         visualize (bool): Whether to visualize density maps
+        use_gpu (bool): Whether to use GPU acceleration if available
 
     Returns:
         None
     """
     print(f"Preparing ShanghaiTech Part {part} dataset...")
+
+    # Set up device
+    device = get_device() if use_gpu else torch.device('cpu')
+    print(f"Using device: {device}")
 
     # Convert to Path objects for better cross-platform compatibility
     dataset_path = Path(dataset_path)
@@ -86,6 +149,12 @@ def prepare_shanghai_tech(dataset_path, output_path, part='A', use_adaptive=Fals
     n_train_split = int(0.7 * n_train)
     n_val_split = int(0.15 * n_train)
 
+    # Create image transform for GPU processing
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+
     for i, img_path in enumerate(tqdm(train_images)):
         img_name = img_path.name
         img_id = img_path.stem
@@ -114,13 +183,16 @@ def prepare_shanghai_tech(dataset_path, output_path, part='A', use_adaptive=Fals
         else:
             raise ValueError(f"Unexpected MAT file format: {gt_path}")
 
-        # Create density map
-        if use_adaptive:
-            density_map = create_density_map_adaptive(points, height, width, k=3)
-        else:
-            # Use smaller sigma for small crowds
+        # Create density map using GPU if available
+        if use_gpu and device.type != 'cpu':
             sigma = min(8, max(4, len(points) / 10))  # Adaptive sigma based on crowd size
-            density_map = create_density_map_gaussian(points, height, width, sigma=sigma)
+            density_map = gpu_create_density_map(points, height, width, sigma=sigma, device=device)
+        else:
+            if use_adaptive:
+                density_map = create_density_map_adaptive(points, height, width, k=3)
+            else:
+                sigma = min(8, max(4, len(points) / 10))
+                density_map = create_density_map_gaussian(points, height, width, sigma=sigma)
 
         # Save image and density map based on split
         if i < n_train_split:
@@ -204,13 +276,16 @@ def prepare_shanghai_tech(dataset_path, output_path, part='A', use_adaptive=Fals
         else:
             raise ValueError(f"Unexpected MAT file format: {gt_path}")
 
-        # Create density map
-        if use_adaptive:
-            density_map = create_density_map_adaptive(points, height, width, k=3)
+        # Create density map using GPU if available
+        if use_gpu and device.type != 'cpu':
+            sigma = min(8, max(4, len(points) / 10))
+            density_map = gpu_create_density_map(points, height, width, sigma=sigma, device=device)
         else:
-            # Use smaller sigma for small crowds
-            sigma = min(8, max(4, len(points) / 10))  # Adaptive sigma based on crowd size
-            density_map = create_density_map_gaussian(points, height, width, sigma=sigma)
+            if use_adaptive:
+                density_map = create_density_map_adaptive(points, height, width, k=3)
+            else:
+                sigma = min(8, max(4, len(points) / 10))
+                density_map = create_density_map_gaussian(points, height, width, sigma=sigma)
 
         # Save image and density map
         output_img_path = test_output_img_path / img_name
@@ -274,6 +349,8 @@ if __name__ == "__main__":
                         help='Use adaptive Gaussian kernels')
     parser.add_argument('--visualize', action='store_true',
                         help='Visualize density maps')
+    parser.add_argument('--use-gpu', action='store_true', default=True,
+                        help='Use GPU acceleration if available')
     args = parser.parse_args()
 
-    prepare_shanghai_tech(args.dataset_path, args.output_path, args.part, args.adaptive, args.visualize)
+    prepare_shanghai_tech(args.dataset_path, args.output_path, args.part, args.adaptive, args.visualize, args.use_gpu)
