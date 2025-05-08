@@ -118,7 +118,9 @@ def prepare_shanghai_tech(dataset_path, output_path, part='A', use_adaptive=Fals
         if use_adaptive:
             density_map = create_density_map_adaptive(points, height, width, k=3)
         else:
-            density_map = create_density_map_gaussian(points, height, width, sigma=4)
+            # Use smaller sigma for small crowds
+            sigma = min(8, max(4, len(points) / 10))  # Adaptive sigma based on crowd size
+            density_map = create_density_map_gaussian(points, height, width, sigma=sigma)
 
         # Save image and density map based on split
         if i < n_train_split:
@@ -206,7 +208,9 @@ def prepare_shanghai_tech(dataset_path, output_path, part='A', use_adaptive=Fals
         if use_adaptive:
             density_map = create_density_map_adaptive(points, height, width, k=3)
         else:
-            density_map = create_density_map_gaussian(points, height, width, sigma=4)
+            # Use smaller sigma for small crowds
+            sigma = min(8, max(4, len(points) / 10))  # Adaptive sigma based on crowd size
+            density_map = create_density_map_gaussian(points, height, width, sigma=sigma)
 
         # Save image and density map
         output_img_path = test_output_img_path / img_name

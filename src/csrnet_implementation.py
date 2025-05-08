@@ -132,10 +132,13 @@ class CrowdDataset(Dataset):
 
         # Load and preprocess density map
         density_map = np.load(self.density_map_files[idx])
-        density_map = cv2.resize(density_map, self.target_size, interpolation=cv2.INTER_LINEAR)
 
-        # Normalize density map
-        density_map = density_map * (self.target_size[0] * self.target_size[1]) / (density_map.shape[0] * density_map.shape[1])
+        # Use cubic interpolation for better density map resizing
+        density_map = cv2.resize(density_map, self.target_size, interpolation=cv2.INTER_CUBIC)
+
+        # Calculate scale factor for density map normalization
+        scale_factor = (self.target_size[0] * self.target_size[1]) / (density_map.shape[0] * density_map.shape[1])
+        density_map = density_map * scale_factor
 
         if self.transform is not None:
             img = self.transform(img)
@@ -393,9 +396,9 @@ def predict(model, image_path, device):
 
 def main():
     parser = argparse.ArgumentParser(description='CSRNet for Crowd Counting')
-    parser.add_argument('--batch-size', type=int, default=8, help='input batch size for training (default: 8)')
-    parser.add_argument('--epochs', type=int, default=50, help='number of epochs to train (default: 50)')
-    parser.add_argument('--lr', type=float, default=1e-5, help='learning rate (default: 1e-5)')
+    parser.add_argument('--batch-size', type=int, default=16, help='input batch size for training (default: 16)')
+    parser.add_argument('--epochs', type=int, default=100, help='number of epochs to train (default: 100)')
+    parser.add_argument('--lr', type=float, default=1e-4, help='learning rate (default: 1e-4)')
     parser.add_argument('--no-cuda', action='store_true', default=False, help='disables CUDA training')
     parser.add_argument('--seed', type=int, default=42, help='random seed (default: 42)')
     parser.add_argument('--log-interval', type=int, default=10, help='how many batches to wait before logging training status')
@@ -434,6 +437,8 @@ def main():
         # Data transforms with optimizations
         transform = transforms.Compose([
             transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(10),
+            transforms.ColorJitter(brightness=0.2, contrast=0.2),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
@@ -478,9 +483,14 @@ def main():
 
         # Optimizer with gradient clipping
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=0.5, patience=5, verbose=True
+        )
         max_grad_norm = 1.0
 
         best_mae = float('inf')
+        patience = 10
+        patience_counter = 0
 
         # Training loop with profiling
         for epoch in range(1, args.epochs + 1):
@@ -498,6 +508,9 @@ def main():
                 train_loss = train(model, train_loader, optimizer, epoch, device, monitor)
                 val_loss, mae = validate(model, val_loader, device)
 
+            # Update learning rate
+            scheduler.step(val_loss)
+
             # Update metrics
             monitor.update_metrics(train_loss=train_loss, val_loss=val_loss, mae=mae)
 
@@ -510,6 +523,14 @@ def main():
                 best_mae = mae
                 torch.save(model.state_dict(), 'csrnet_best.pth')
                 print(f"Saved best model with MAE: {best_mae:.2f}")
+                patience_counter = 0
+            else:
+                patience_counter += 1
+
+            # Early stopping
+            if patience_counter >= patience:
+                print(f"Early stopping triggered after {epoch} epochs")
+                break
 
             # Save checkpoint
             if args.save_model and epoch % 5 == 0:
