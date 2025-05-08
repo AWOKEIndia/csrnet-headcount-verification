@@ -13,7 +13,11 @@ import glob
 import argparse
 import time
 from tqdm import tqdm
+import ssl
+import urllib.request
 
+# Disable SSL certificate verification for downloading pre-trained weights
+ssl._create_default_https_context = ssl._create_unverified_context
 
 class CSRNet(nn.Module):
     """
@@ -29,19 +33,25 @@ class CSRNet(nn.Module):
         self.output_layer = nn.Conv2d(64, 1, kernel_size=1)
 
         if load_weights:
-            # Load pretrained VGG16 weights
-            vgg16 = models.vgg16(pretrained=True)
-            self._initialize_weights()
+            try:
+                # Load pretrained VGG16 weights
+                vgg16 = models.vgg16(weights='VGG16_Weights.IMAGENET1K_V1')
+                self._initialize_weights()
 
-            # Copy VGG16 weights to frontend
-            vgg_frontend_dict = dict([(name, param) for name, param in vgg16.named_parameters()])
-            frontend_state_dict = self.frontend.state_dict()
+                # Copy VGG16 weights to frontend
+                vgg_frontend_dict = dict([(name, param) for name, param in vgg16.named_parameters()])
+                frontend_state_dict = self.frontend.state_dict()
 
-            for name, param in frontend_state_dict.items():
-                if name in vgg_frontend_dict:
-                    frontend_state_dict[name].copy_(vgg_frontend_dict[name])
+                for name, param in frontend_state_dict.items():
+                    if name in vgg_frontend_dict:
+                        frontend_state_dict[name].copy_(vgg_frontend_dict[name])
 
-            self.frontend.load_state_dict(frontend_state_dict)
+                self.frontend.load_state_dict(frontend_state_dict)
+                print("Successfully loaded pre-trained VGG16 weights")
+            except Exception as e:
+                print(f"Warning: Could not load pre-trained weights: {e}")
+                print("Initializing weights randomly")
+                self._initialize_weights()
 
     def forward(self, x):
         x = self.frontend(x)
@@ -79,10 +89,11 @@ class CrowdDataset(Dataset):
     """
     Dataset class for crowd counting
     """
-    def __init__(self, image_root, density_map_root, transform=None):
+    def __init__(self, image_root, density_map_root, transform=None, target_size=(384, 384)):
         self.image_root = image_root
         self.density_map_root = density_map_root
         self.transform = transform
+        self.target_size = target_size
 
         self.image_files = sorted(glob.glob(os.path.join(image_root, '*.jpg')))
         self.density_map_files = sorted(glob.glob(os.path.join(density_map_root, '*.npy')))
@@ -94,8 +105,16 @@ class CrowdDataset(Dataset):
         return len(self.image_files)
 
     def __getitem__(self, idx):
+        # Load and preprocess image
         img = Image.open(self.image_files[idx]).convert('RGB')
+        img = img.resize(self.target_size, Image.BILINEAR)
+
+        # Load and preprocess density map
         density_map = np.load(self.density_map_files[idx])
+        density_map = cv2.resize(density_map, self.target_size, interpolation=cv2.INTER_LINEAR)
+
+        # Normalize density map
+        density_map = density_map * (self.target_size[0] * self.target_size[1]) / (density_map.shape[0] * density_map.shape[1])
 
         if self.transform is not None:
             img = self.transform(img)
@@ -138,6 +157,10 @@ def train(model, train_loader, optimizer, epoch, device):
         optimizer.zero_grad()
         output = model(data)
 
+        # Ensure output and target have the same size
+        if output.size() != target.size():
+            output = F.interpolate(output, size=target.size()[2:], mode='bilinear', align_corners=False)
+
         # MSE Loss
         loss = F.mse_loss(output, target)
         loss.backward()
@@ -166,6 +189,10 @@ def validate(model, val_loader, device):
         for data, target in tqdm(val_loader):
             data, target = data.to(device), target.to(device)
             output = model(data)
+
+            # Ensure output and target have the same size
+            if output.size() != target.size():
+                output = F.interpolate(output, size=target.size()[2:], mode='bilinear', align_corners=False)
 
             # MSE Loss
             val_loss += F.mse_loss(output, target).item()
@@ -234,6 +261,7 @@ def main():
     parser.add_argument('--mode', type=str, default='train', choices=['train', 'test'], help='train or test mode')
     parser.add_argument('--test-image', type=str, default=None, help='path to test image')
     parser.add_argument('--load-model', type=str, default=None, help='path to saved model')
+    parser.add_argument('--image-size', type=int, default=384, help='input image size (default: 384)')
     args = parser.parse_args()
 
     use_cuda = not args.no_cuda and torch.cuda.is_available()
@@ -256,11 +284,13 @@ def main():
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
-        # Create datasets
+        # Create datasets with consistent image size
+        target_size = (args.image_size, args.image_size)
         train_dataset = CrowdDataset(
             os.path.join(args.data_path, 'train', 'images'),
             os.path.join(args.data_path, 'train', 'density_maps'),
-            transform=transform
+            transform=transform,
+            target_size=target_size
         )
 
         val_dataset = CrowdDataset(
@@ -269,7 +299,8 @@ def main():
             transform=transforms.Compose([
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-            ])
+            ]),
+            target_size=target_size
         )
 
         # Create data loaders

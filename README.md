@@ -38,16 +38,24 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+4. Download the Shanghai CSRNet Dataset:
+   - Visit the [ShanghaiTech Dataset](https://www.cv-foundation.org/openaccess/content_cvpr_2016/papers/Zhang_Single-Image_Crowd_Counting_CVPR_2016_paper.pdf)
+   - Download both Part A and Part B datasets
+   - Extract the datasets to your project directory
+
 ## File Structure
 
 ```
 ├── csrnet_implementation.py   # CSRNet model implementation
-├── dataset_preparation.py     # Scripts for preparing training/testing data
+├── prepare_shanghai_dataset.py # Script for preparing ShanghaiTech dataset
 ├── model_evaluation.py        # Tools for evaluating model performance
 ├── video_processing.py        # Video and stream processing capabilities
 ├── gui_application.py         # Graphical user interface
 ├── requirements.txt           # Required Python packages
-├── pretrained_model.pth       # Pre-trained model weights (download separately)
+├── data/                      # Dataset directory
+│   ├── ShanghaiTech/
+│   │   ├── part_A/           # Part A dataset
+│   │   └── part_B/           # Part B dataset
 └── README.md                  # This file
 ```
 
@@ -60,7 +68,7 @@ pip install -r requirements.txt
 To prepare a dataset for training the model:
 
 ```bash
-python dataset_preparation.py --data-root /path/to/raw/data --output-root /path/to/processed/data --visualize
+python prepare_shanghai_dataset.py --dataset-path data/ShanghaiTech --output-path data/processed --part A --visualize
 ```
 
 The raw data should contain:
@@ -70,7 +78,7 @@ The raw data should contain:
 #### Training the Model
 
 ```bash
-python csrnet_implementation.py --mode train --data-path /path/to/processed/data --epochs 50 --batch-size 8 --lr 1e-5
+python csrnet_implementation.py --mode train --data-path data/processed --epochs 50 --batch-size 8 --lr 1e-5
 ```
 
 #### Evaluating the Model
@@ -125,13 +133,24 @@ The GUI provides four tabs:
 
 ### Data Preparation
 
-1. Organize your dataset with images and annotations
-2. Run the dataset preparation script to generate density maps
-3. Verify the generated density maps match the annotations
+1. Download and extract the ShanghaiTech dataset
+2. Organize the dataset structure as shown in the File Structure section
+3. Run the dataset preparation script to generate density maps:
+```bash
+python prepare_shanghai_dataset.py --dataset-path data/ShanghaiTech --output-path data/processed --part A --visualize
+```
+   - For Part B dataset, use `--part B`
+   - Add `--adaptive` flag to use adaptive Gaussian kernels
+   - Add `--visualize` flag to generate visualization of density maps
+
+4. Verify the generated density maps match the annotations
 
 ### Training Process
 
-1. Train the model using the training script
+1. Train the model using the training script:
+```bash
+python csrnet_implementation.py --mode train --data-path data/processed --epochs 50 --batch-size 8 --lr 1e-5
+```
 2. Monitor the loss and MAE (Mean Absolute Error) values
 3. Save checkpoints during training
 4. Select the best model based on validation performance
@@ -147,7 +166,7 @@ A pre-trained model is available for download:
 
 ### Supporting New Annotation Formats
 
-Edit the `parse_annotations` function in `dataset_preparation.py` to support your annotation format.
+Edit the `parse_annotations` function in `prepare_shanghai_dataset.py` to support your annotation format.
 
 ### Customizing the Model Architecture
 
@@ -183,7 +202,7 @@ The modular design allows for easy extension:
 ## References
 
 - [CSRNet: Dilated Convolutional Neural Networks for Understanding the Highly Congested Scenes](https://arxiv.org/abs/1802.10062) - Original paper by Y. Li et al.
-- [ShanghaiTech Dataset](https://www.cv-foundation.org/openaccess/content_cvpr_2016/papers/Zhang_Single-Image_Crowd_Counting_CVPR_2016_paper.pdf) - Standard benchmark dataset for crowd counting
+- [ShanghaiTech Dataset](https://www.cv-foundation.org/openaccess/content_cvpr_2016/papers/Zhang_Single-Image_Crowd_Counting_CVPR_2016_paper.pdf) - Dataset used for training and evaluation
 - [PyTorch](https://pytorch.org/) - Deep learning framework used in this implementation
 
 ## Acknowledgements

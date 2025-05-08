@@ -77,7 +77,16 @@ def prepare_shanghai_tech(dataset_path, output_path, part='A', use_adaptive=Fals
     if not train_images:
         raise FileNotFoundError(f"No training images found in {train_images_path}")
 
-    for img_path in tqdm(train_images):
+    # Shuffle the training images for consistent split
+    np.random.seed(42)  # For reproducibility
+    np.random.shuffle(train_images)
+
+    # Calculate split indices for 70/15/15 split
+    n_train = len(train_images)
+    n_train_split = int(0.7 * n_train)
+    n_val_split = int(0.15 * n_train)
+
+    for i, img_path in enumerate(tqdm(train_images)):
         img_name = img_path.name
         img_id = img_path.stem
 
@@ -111,16 +120,19 @@ def prepare_shanghai_tech(dataset_path, output_path, part='A', use_adaptive=Fals
         else:
             density_map = create_density_map_gaussian(points, height, width, sigma=4)
 
-        # Save image and density map
-        # Save 80% to train, 20% to validation
-        if np.random.rand() < 0.8:
+        # Save image and density map based on split
+        if i < n_train_split:
             output_img_path = train_output_img_path / img_name
             output_den_path = train_output_den_path / f'{img_id}.npy'
             subset = 'train'
-        else:
+        elif i < n_train_split + n_val_split:
             output_img_path = val_output_img_path / img_name
             output_den_path = val_output_den_path / f'{img_id}.npy'
             subset = 'val'
+        else:
+            output_img_path = test_output_img_path / img_name
+            output_den_path = test_output_den_path / f'{img_id}.npy'
+            subset = 'test'
 
         shutil.copy(str(img_path), str(output_img_path))
         np.save(str(output_den_path), density_map)
@@ -241,9 +253,9 @@ def prepare_shanghai_tech(dataset_path, output_path, part='A', use_adaptive=Fals
     test_count = len(list(test_output_img_path.glob('*.jpg')))
 
     print(f"Files saved to {output_path}:")
-    print(f"  Train: {train_count} images")
-    print(f"  Validation: {val_count} images")
-    print(f"  Test: {test_count} images")
+    print(f"  Train: {train_count} images (70%)")
+    print(f"  Validation: {val_count} images (15%)")
+    print(f"  Test: {test_count} images (15%)")
 
 
 if __name__ == "__main__":
