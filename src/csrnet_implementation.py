@@ -16,6 +16,11 @@ from tqdm import tqdm
 import ssl
 import urllib.request
 import platform
+import psutil
+import gc
+from datetime import datetime
+import json
+from torch.profiler import profile, record_function, ProfilerActivity
 
 # Disable SSL certificate verification for downloading pre-trained weights
 ssl._create_default_https_context = ssl._create_unverified_context
@@ -161,17 +166,133 @@ def create_density_map_gaussian(points, height, width, sigma=15):
     return density_map
 
 
-def train(model, train_loader, optimizer, epoch, device):
+class PerformanceMonitor:
+    def __init__(self, log_dir='logs'):
+        self.log_dir = log_dir
+        os.makedirs(log_dir, exist_ok=True)
+        self.metrics = {
+            'train_loss': [],
+            'val_loss': [],
+            'mae': [],
+            'epoch_time': [],
+            'memory_usage': [],
+            'gpu_memory': [],
+            'batch_times': []
+        }
+        self.start_time = None
+        self.batch_times = []
+
+    def start_epoch(self):
+        self.start_time = time.time()
+        self.batch_times = []
+
+    def end_epoch(self):
+        epoch_time = time.time() - self.start_time
+        self.metrics['epoch_time'].append(epoch_time)
+
+        # Get memory usage
+        process = psutil.Process()
+        memory_info = process.memory_info()
+        self.metrics['memory_usage'].append(memory_info.rss / 1024 / 1024)  # MB
+
+        # Get GPU memory if available
+        if torch.backends.mps.is_available():
+            try:
+                gpu_memory = torch.mps.current_allocated_memory() / 1024 / 1024  # MB
+                self.metrics['gpu_memory'].append(gpu_memory)
+            except:
+                self.metrics['gpu_memory'].append(0)
+        elif torch.cuda.is_available():
+            self.metrics['gpu_memory'].append(torch.cuda.memory_allocated() / 1024 / 1024)  # MB
+        else:
+            self.metrics['gpu_memory'].append(0)
+
+        # Calculate average batch time
+        if self.batch_times:
+            self.metrics['batch_times'].append(np.mean(self.batch_times))
+
+    def update_metrics(self, train_loss=None, val_loss=None, mae=None):
+        if train_loss is not None:
+            self.metrics['train_loss'].append(train_loss)
+        if val_loss is not None:
+            self.metrics['val_loss'].append(val_loss)
+        if mae is not None:
+            self.metrics['mae'].append(mae)
+
+    def log_batch_time(self, batch_time):
+        self.batch_times.append(batch_time)
+
+    def save_metrics(self, epoch):
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        metrics_file = os.path.join(self.log_dir, f'metrics_epoch_{epoch}_{timestamp}.json')
+
+        # Convert numpy values to Python native types
+        metrics_dict = {k: [float(x) if isinstance(x, np.float32) else x for x in v]
+                       for k, v in self.metrics.items()}
+
+        with open(metrics_file, 'w') as f:
+            json.dump(metrics_dict, f, indent=4)
+
+    def plot_metrics(self, epoch):
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        plots_dir = os.path.join(self.log_dir, 'plots')
+        os.makedirs(plots_dir, exist_ok=True)
+
+        # Plot training metrics
+        plt.figure(figsize=(15, 10))
+
+        # Loss plot
+        plt.subplot(2, 2, 1)
+        plt.plot(self.metrics['train_loss'], label='Train Loss')
+        plt.plot(self.metrics['val_loss'], label='Val Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.legend()
+        plt.title('Training and Validation Loss')
+
+        # MAE plot
+        plt.subplot(2, 2, 2)
+        plt.plot(self.metrics['mae'])
+        plt.xlabel('Epoch')
+        plt.ylabel('MAE')
+        plt.title('Mean Absolute Error')
+
+        # Memory usage plot
+        plt.subplot(2, 2, 3)
+        plt.plot(self.metrics['memory_usage'], label='RAM')
+        plt.plot(self.metrics['gpu_memory'], label='GPU Memory')
+        plt.xlabel('Epoch')
+        plt.ylabel('Memory (MB)')
+        plt.legend()
+        plt.title('Memory Usage')
+
+        # Batch time plot
+        plt.subplot(2, 2, 4)
+        plt.plot(self.metrics['batch_times'])
+        plt.xlabel('Epoch')
+        plt.ylabel('Time (s)')
+        plt.title('Average Batch Processing Time')
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(plots_dir, f'metrics_epoch_{epoch}_{timestamp}.png'))
+        plt.close()
+
+def train(model, train_loader, optimizer, epoch, device, monitor):
     """
-    Training function
+    Training function with performance monitoring
     """
     model.train()
     train_loss = 0
+    monitor.start_epoch()
 
     for batch_idx, (data, target) in enumerate(tqdm(train_loader)):
+        batch_start = time.time()
+
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
-        output = model(data)
+
+        with record_function("model_forward"):
+            output = model(data)
 
         # Ensure output and target have the same size
         if output.size() != target.size():
@@ -184,12 +305,18 @@ def train(model, train_loader, optimizer, epoch, device):
 
         train_loss += loss.item()
 
+        # Record batch time
+        batch_time = time.time() - batch_start
+        monitor.log_batch_time(batch_time)
+
         if batch_idx % 10 == 0:
             print(f'Train Epoch: {epoch} [{batch_idx * len(data)}/{len(train_loader.dataset)} '
                   f'({100. * batch_idx / len(train_loader):.0f}%)]\tLoss: {loss.item():.6f}')
 
     train_loss /= len(train_loader)
     print(f'Train Epoch: {epoch}, Average Loss: {train_loss:.6f}')
+
+    monitor.end_epoch()
     return train_loss
 
 
@@ -279,6 +406,7 @@ def main():
     parser.add_argument('--load-model', type=str, default=None, help='path to saved model')
     parser.add_argument('--image-size', type=int, default=384, help='input image size (default: 384)')
     parser.add_argument('--num-workers', type=int, default=4, help='number of workers for data loading (default: 4)')
+    parser.add_argument('--profile', action='store_true', help='enable PyTorch profiler')
     args = parser.parse_args()
 
     # Set device
@@ -300,7 +428,10 @@ def main():
         print(f"Loaded model from {args.load_model}")
 
     if args.mode == 'train':
-        # Data transforms
+        # Initialize performance monitor
+        monitor = PerformanceMonitor()
+
+        # Data transforms with optimizations
         transform = transforms.Compose([
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
@@ -332,7 +463,8 @@ def main():
             batch_size=args.batch_size,
             shuffle=True,
             num_workers=args.num_workers,
-            pin_memory=True if device.type != 'mps' else False  # MPS doesn't support pin_memory
+            pin_memory=True if device.type != 'mps' else False,
+            persistent_workers=True if args.num_workers > 0 else False
         )
 
         val_loader = DataLoader(
@@ -340,18 +472,38 @@ def main():
             batch_size=args.batch_size,
             shuffle=False,
             num_workers=args.num_workers,
-            pin_memory=True if device.type != 'mps' else False
+            pin_memory=True if device.type != 'mps' else False,
+            persistent_workers=True if args.num_workers > 0 else False
         )
 
-        # Optimizer
+        # Optimizer with gradient clipping
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+        max_grad_norm = 1.0
 
         best_mae = float('inf')
 
-        # Training loop
+        # Training loop with profiling
         for epoch in range(1, args.epochs + 1):
-            train_loss = train(model, train_loader, optimizer, epoch, device)
-            val_loss, mae = validate(model, val_loader, device)
+            if args.profile and epoch == 1:
+                with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                           schedule=torch.profiler.schedule(wait=1, warmup=1, active=3),
+                           on_trace_ready=torch.profiler.tensorboard_trace_handler('./log/profiler'),
+                           record_shapes=True,
+                           profile_memory=True,
+                           with_stack=True) as prof:
+                    train_loss = train(model, train_loader, optimizer, epoch, device, monitor)
+                    val_loss, mae = validate(model, val_loader, device)
+                    prof.step()
+            else:
+                train_loss = train(model, train_loader, optimizer, epoch, device, monitor)
+                val_loss, mae = validate(model, val_loader, device)
+
+            # Update metrics
+            monitor.update_metrics(train_loss=train_loss, val_loss=val_loss, mae=mae)
+
+            # Save metrics and plots
+            monitor.save_metrics(epoch)
+            monitor.plot_metrics(epoch)
 
             # Save the best model
             if mae < best_mae and args.save_model:
@@ -362,6 +514,13 @@ def main():
             # Save checkpoint
             if args.save_model and epoch % 5 == 0:
                 torch.save(model.state_dict(), f'csrnet_epoch_{epoch}.pth')
+
+            # Clear memory
+            if device.type == 'mps':
+                torch.mps.empty_cache()
+            elif device.type == 'cuda':
+                torch.cuda.empty_cache()
+            gc.collect()
 
         # Save final model
         if args.save_model:
