@@ -101,6 +101,15 @@ def create_density_map_gaussian(points, height, width, sigma=15):
     if len(points) == 0:
         return density_map
 
+    # Make sure sigma is valid
+    if sigma <= 0:
+        sigma = 15
+
+    # Calculate kernel size based on sigma (must be odd)
+    kernel_size = max(1, int(sigma * 3)) # 3 sigma rule
+    if kernel_size % 2 == 0:
+        kernel_size += 1  # Make it odd
+
     # Generate density map with fixed sigma
     for point in points:
         x, y = int(point[0]), int(point[1])
@@ -108,7 +117,7 @@ def create_density_map_gaussian(points, height, width, sigma=15):
             # Generate a Gaussian kernel for each point
             gaussian_kernel = np.zeros((height, width), dtype=np.float32)
             gaussian_kernel[y, x] = 1
-            gaussian_kernel = cv2.GaussianBlur(gaussian_kernel, (sigma, sigma), 0)
+            gaussian_kernel = cv2.GaussianBlur(gaussian_kernel, (kernel_size, kernel_size), sigma)
             gaussian_kernel = gaussian_kernel / np.sum(gaussian_kernel)  # Normalize
 
             density_map += gaussian_kernel
@@ -150,13 +159,16 @@ def create_density_map_adaptive(points, height, width, k=3):
             avg_distance = np.mean(distances[i][1:])
             sigma = max(3, avg_distance * 0.3)  # Lower bound of sigma
 
+            # Calculate kernel size based on sigma (must be odd)
+            kernel_size = max(1, int(sigma * 3))  # 3 sigma rule
+            if kernel_size % 2 == 0:
+                kernel_size += 1  # Make it odd
+
             # Generate a Gaussian kernel with adaptive sigma
             gaussian_kernel = np.zeros((height, width), dtype=np.float32)
             gaussian_kernel[y, x] = 1
 
-            # Ensure sigma is odd for GaussianBlur
-            sigma_odd = int(sigma * 3) * 2 + 1
-            gaussian_kernel = cv2.GaussianBlur(gaussian_kernel, (sigma_odd, sigma_odd), 0)
+            gaussian_kernel = cv2.GaussianBlur(gaussian_kernel, (kernel_size, kernel_size), sigma)
             gaussian_kernel = gaussian_kernel / np.sum(gaussian_kernel)  # Normalize
 
             density_map += gaussian_kernel
