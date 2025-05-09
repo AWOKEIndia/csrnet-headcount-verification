@@ -80,8 +80,14 @@ def predict_headcount(model, image_path, device, target_size=(384, 384), calibra
     # Get density map
     density_map = output.squeeze().cpu().numpy()
 
+    # Clamp density map to non-negative values
+    density_map = np.clip(density_map, 0, None)
+
     # Calculate predicted count (sum of density map)
     raw_count = float(np.sum(density_map))
+
+    # Print sum for debugging
+    print(f"[DEBUG] Density map sum (raw count): {raw_count:.2f}")
 
     # Apply calibration factor
     predicted_count = raw_count * calibration_factor
@@ -105,7 +111,7 @@ def predict_headcount(model, image_path, device, target_size=(384, 384), calibra
 
 def visualize_prediction(image, density_map, count, output_path=None, display=False):
     """
-    Visualize prediction results with heatmap overlay
+    Visualize prediction results with heatmap overlay and detailed metrics
 
     Args:
         image (PIL.Image): Original image
@@ -120,28 +126,46 @@ def visualize_prediction(image, density_map, count, output_path=None, display=Fa
     # Convert image to numpy array
     img_np = np.array(image)
 
-    # Create figure
-    plt.figure(figsize=(18, 6))
+    # Ensure density map matches image size for overlay
+    if density_map.shape != img_np.shape[:2]:
+        from cv2 import resize, INTER_LINEAR
+        density_map_resized = resize(density_map, (img_np.shape[1], img_np.shape[0]), interpolation=INTER_LINEAR)
+    else:
+        density_map_resized = density_map
+
+    # Create figure with 2x2 subplots
+    plt.figure(figsize=(20, 10))
 
     # Original image
-    plt.subplot(1, 3, 1)
+    plt.subplot(2, 2, 1)
     plt.imshow(img_np)
-    plt.title('Original Image')
+    plt.title('Original Image', fontsize=12)
     plt.axis('off')
 
     # Density map
-    plt.subplot(1, 3, 2)
-    plt.imshow(density_map, cmap='jet')
-    plt.title(f'Density Map\nPredicted Count: {count:.1f}')
+    plt.subplot(2, 2, 2)
+    density_plot = plt.imshow(density_map, cmap='jet')
+    plt.title(f'Density Map\nPredicted Count: {count:.1f}', fontsize=12)
     plt.axis('off')
-    plt.colorbar()
+    plt.colorbar(density_plot, fraction=0.046, pad=0.04)
 
-    # Overlay
-    plt.subplot(1, 3, 3)
+    # Overlay (density map on original image)
+    plt.subplot(2, 2, 3)
     plt.imshow(img_np)
-    plt.imshow(density_map, cmap='jet', alpha=0.6)
-    plt.title(f'Overlay\nPredicted Count: {count:.1f}')
+    plt.imshow(density_map_resized, cmap='jet', alpha=0.5)  # Use alpha=0.5 for better blending
+    plt.title(f'Overlay\nPredicted Count: {count:.1f}', fontsize=12)
     plt.axis('off')
+
+    # Density map statistics
+    plt.subplot(2, 2, 4)
+    plt.hist(density_map.flatten(), bins=50, color='blue', alpha=0.7)
+    plt.title('Density Distribution', fontsize=12)
+    plt.xlabel('Density Value')
+    plt.ylabel('Frequency')
+    plt.grid(True, alpha=0.3)
+
+    # Add overall title with metrics
+    plt.suptitle(f'CSRNet Headcount Analysis\nPredicted Count: {count:.1f}', fontsize=14, y=0.95)
 
     # Save visualization
     if output_path:
@@ -158,7 +182,7 @@ def visualize_prediction(image, density_map, count, output_path=None, display=Fa
     return output_path if output_path else None
 
 def process_single_image(model, image_path, device, target_size=(384, 384),
-                        calibration_factor=1.0, output_dir='results', display=False):
+                        calibration_factor=1.0, output_dir='output/results', display=False):
     """Process a single image and visualize the results"""
     # Predict headcount
     count, density_map, original_img = predict_headcount(
@@ -196,7 +220,7 @@ def process_single_image(model, image_path, device, target_size=(384, 384),
 
 def process_batch(model, image_dir, device, target_size=(384, 384),
                 calibration_factor=1.0, output_dir='results', display=False):
-    """Process all images in a directory"""
+    """Process all images in a directory and generate batch statistics"""
     # Get all image files
     image_files = []
     for ext in ['jpg', 'jpeg', 'png']:
@@ -210,28 +234,91 @@ def process_batch(model, image_dir, device, target_size=(384, 384),
 
     # Process each image
     results = []
+    counts = []
     for image_path in tqdm(image_files):
         result = process_single_image(
             model, image_path, device, target_size, calibration_factor, output_dir, display
         )
         if result:
             results.append(result)
+            counts.append(result['predicted_count'])
 
-    # Save batch results
-    batch_results = {
+    if not results:
+        print("No valid results generated")
+        return []
+
+    # Calculate batch statistics
+    counts = np.array(counts)
+    batch_stats = {
         'total_images': len(results),
-        'average_count': sum(r['predicted_count'] for r in results) / len(results) if results else 0,
+        'average_count': float(np.mean(counts)),
+        'median_count': float(np.median(counts)),
+        'min_count': float(np.min(counts)),
+        'max_count': float(np.max(counts)),
+        'std_count': float(np.std(counts)),
         'calibration_factor': calibration_factor,
         'results': results
     }
 
+    # Save batch results
     batch_json_path = os.path.join(output_dir, 'batch_results.json')
     with open(batch_json_path, 'w') as f:
-        json.dump(batch_results, f, indent=4)
+        json.dump(batch_stats, f, indent=4)
+
+    # Generate batch visualization
+    plt.figure(figsize=(15, 10))
+
+    # Count distribution
+    plt.subplot(2, 2, 1)
+    plt.hist(counts, bins=30, color='blue', alpha=0.7)
+    plt.title('Count Distribution')
+    plt.xlabel('Predicted Count')
+    plt.ylabel('Frequency')
+    plt.grid(True, alpha=0.3)
+
+    # Box plot
+    plt.subplot(2, 2, 2)
+    plt.boxplot(counts)
+    plt.title('Count Statistics')
+    plt.ylabel('Predicted Count')
+    plt.grid(True, alpha=0.3)
+
+    # Scatter plot of counts
+    plt.subplot(2, 2, 3)
+    plt.scatter(range(len(counts)), counts, alpha=0.6)
+    plt.axhline(y=np.mean(counts), color='r', linestyle='--', label=f'Mean: {np.mean(counts):.1f}')
+    plt.title('Count Distribution Over Images')
+    plt.xlabel('Image Index')
+    plt.ylabel('Predicted Count')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    # Summary statistics
+    plt.subplot(2, 2, 4)
+    plt.axis('off')
+    stats_text = (
+        f"Batch Statistics:\n\n"
+        f"Total Images: {len(results)}\n"
+        f"Average Count: {np.mean(counts):.1f}\n"
+        f"Median Count: {np.median(counts):.1f}\n"
+        f"Min Count: {np.min(counts):.1f}\n"
+        f"Max Count: {np.max(counts):.1f}\n"
+        f"Std Dev: {np.std(counts):.1f}\n"
+        f"Calibration Factor: {calibration_factor:.4f}"
+    )
+    plt.text(0.1, 0.5, stats_text, fontsize=12, va='center')
+
+    plt.suptitle('Batch Analysis Results', fontsize=14, y=0.95)
+
+    # Save batch visualization
+    batch_vis_path = os.path.join(output_dir, 'batch_analysis.png')
+    plt.savefig(batch_vis_path, dpi=200, bbox_inches='tight')
+    plt.close()
 
     print(f"\nProcessed {len(results)} images")
-    print(f"Average count: {batch_results['average_count']:.1f}")
+    print(f"Average count: {batch_stats['average_count']:.1f}")
     print(f"Results saved to {batch_json_path}")
+    print(f"Batch visualization saved to {batch_vis_path}")
 
     return results
 
@@ -326,7 +413,7 @@ def main():
     parser.add_argument('--calibration_factor', type=float, default=1.0, help='manual calibration factor')
 
     # Output options
-    parser.add_argument('--output_dir', type=str, default='results', help='output directory')
+    parser.add_argument('--output_dir', type=str, default='output/results', help='output directory')
     parser.add_argument('--display', action='store_true', help='display results (requires GUI)')
 
     args = parser.parse_args()
