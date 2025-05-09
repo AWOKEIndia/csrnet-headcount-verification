@@ -142,7 +142,16 @@ class PerformanceMonitor:
 
     def save_metrics(self):
         """Save metrics to CSV file"""
-        df = pd.DataFrame(self.metrics)
+        # Find the minimum length among all metric arrays
+        min_length = min(len(arr) for arr in self.metrics.values())
+
+        # Create a new dictionary with truncated arrays
+        truncated_metrics = {
+            key: arr[:min_length] for key, arr in self.metrics.items()
+        }
+
+        # Create DataFrame with truncated arrays
+        df = pd.DataFrame(truncated_metrics)
         df.to_csv(os.path.join(self.metrics_dir, 'metrics.csv'), index=False)
 
         # Save best metrics
