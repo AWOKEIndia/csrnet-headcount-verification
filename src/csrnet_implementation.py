@@ -43,16 +43,29 @@ def get_device():
 class AttentionModule(nn.Module):
     def __init__(self, in_channels):
         super(AttentionModule, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
-        self.conv2 = nn.Conv2d(in_channels // 8, 1, kernel_size=1)
-        self.sigmoid = nn.Sigmoid()
+        if in_channels == 1:
+            # For single channel, use a simpler attention mechanism
+            self.conv1 = nn.Conv2d(1, 1, kernel_size=3, padding=1)
+            self.sigmoid = nn.Sigmoid()
+        else:
+            # For multi-channel inputs
+            self.conv1 = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
+            self.conv2 = nn.Conv2d(in_channels // 8, 1, kernel_size=1)
+            self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        attention = self.conv1(x)
-        attention = F.relu(attention)
-        attention = self.conv2(attention)
-        attention = self.sigmoid(attention)
-        return x * attention
+        if x.size(1) == 1:
+            # Simple attention for single channel
+            attention = self.conv1(x)
+            attention = self.sigmoid(attention)
+            return x * attention
+        else:
+            # Multi-channel attention
+            attention = self.conv1(x)
+            attention = F.relu(attention)
+            attention = self.conv2(attention)
+            attention = self.sigmoid(attention)
+            return x * attention
 
 class CSRNet(nn.Module):
     """
@@ -66,17 +79,17 @@ class CSRNet(nn.Module):
         self.frontend = self._make_layers(self.frontend_feat)
         self.backend = self._make_layers(self.backend_feat, in_channels=512, dilation=True)
 
-        # Add attention modules
-        self.attention1 = AttentionModule(512)
-        self.attention2 = AttentionModule(256)
-        self.attention3 = AttentionModule(128)
+        # Add attention modules with correct channel dimensions
+        self.attention1 = AttentionModule(512)  # After frontend
+        self.attention2 = AttentionModule(64)   # After backend
+        self.attention3 = AttentionModule(1)    # After output layer
 
         self.output_layer = nn.Conv2d(64, 1, kernel_size=1)
 
-        # Add batch normalization
-        self.bn1 = nn.BatchNorm2d(512)
-        self.bn2 = nn.BatchNorm2d(256)
-        self.bn3 = nn.BatchNorm2d(128)
+        # Add batch normalization with correct channel dimensions
+        self.bn1 = nn.BatchNorm2d(512)  # After frontend
+        self.bn2 = nn.BatchNorm2d(64)   # After backend
+        self.bn3 = nn.BatchNorm2d(1)    # After output layer
 
         if load_weights:
             try:
@@ -100,14 +113,17 @@ class CSRNet(nn.Module):
                 self._initialize_weights()
 
     def forward(self, x):
+        # Frontend
         x = self.frontend(x)
         x = self.bn1(x)
         x = self.attention1(x)
 
+        # Backend
         x = self.backend(x)
         x = self.bn2(x)
         x = self.attention2(x)
 
+        # Output
         x = self.output_layer(x)
         x = self.bn3(x)
         x = self.attention3(x)

@@ -13,6 +13,27 @@ The CSRNet Headcount Verification System allows you to:
 5. Use a convenient GUI interface for all functionality
 6. Automatically utilize the best available hardware (CUDA GPU, Apple Metal, or CPU)
 
+## Key Features
+
+- **Enhanced Model Architecture**:
+  - Attention mechanisms for better head detection
+  - Batch normalization for improved training stability
+  - Adaptive density map generation
+  - Multi-scale feature processing
+
+- **Advanced Training Features**:
+  - In-memory dataset caching for faster training
+  - Adaptive learning rate scheduling
+  - Early stopping with configurable patience
+  - Combined loss function (MSE, L1, and gradient loss)
+  - Memory-efficient training pipeline
+
+- **Optimized Data Processing**:
+  - Efficient data loading with prefetching
+  - Persistent workers for faster training
+  - Pinned memory for faster GPU transfer
+  - Advanced data augmentation techniques
+
 ## Requirements
 
 - Python 3.6+
@@ -50,7 +71,7 @@ pip install -r requirements.txt
 ## File Structure
 
 ```
-├── csrnet_implementation.py   # CSRNet model implementation
+├── csrnet_implementation.py   # Enhanced CSRNet model implementation
 ├── prepare_shanghai_dataset.py # Script for preparing ShanghaiTech dataset
 ├── model_evaluation.py        # Tools for evaluating model performance
 ├── video_processing.py        # Video and stream processing capabilities
@@ -67,23 +88,28 @@ pip install -r requirements.txt
 
 ### Command Line Interface
 
-#### Preparing a Dataset
-
-To prepare a dataset for training the model:
-
-```bash
-python prepare_shanghai_dataset.py --dataset-path data/ShanghaiTech --output-path data/processed --part A --visualize
-```
-
-The raw data should contain:
-- `images/` folder with image files
-- `annotations/` folder with corresponding annotation files (JSON format)
-
 #### Training the Model
 
 ```bash
-python csrnet_implementation.py --mode train --data-path data/processed --epochs 50 --batch-size 8 --lr 1e-5
+python src/csrnet_implementation.py \
+    --mode train \
+    --data-path data/processed \
+    --epochs 100 \
+    --batch-size 32 \
+    --num-workers 8 \
+    --cache-size 2000 \
+    --prefetch-factor 3 \
+    --patience 15 \
+    --pin-memory \
+    --persistent-workers
 ```
+
+Key training parameters:
+- `--cache-size`: Number of images to cache in memory (default: 1000)
+- `--prefetch-factor`: Number of batches to prefetch (default: 2)
+- `--patience`: Early stopping patience (default: 10)
+- `--pin-memory`: Enable pinned memory for faster GPU transfer
+- `--persistent-workers`: Use persistent workers for data loading
 
 #### Evaluating the Model
 
@@ -101,6 +127,11 @@ The system will automatically detect and use the best available hardware:
 ```bash
 python model_evaluation.py --model path/to/model.pth --mode single --image path/to/image.jpg --output-dir path/to/results
 ```
+
+The output will include:
+- Original image
+- Density map visualization
+- Detected heads with confidence scores
 
 #### Batch Processing Images
 
@@ -124,136 +155,106 @@ For RTSP stream:
 python video_processing.py --model path/to/model.pth --mode rtsp --input "rtsp://your-stream-url"
 ```
 
-### Graphical User Interface
+### Training Your Own Model
 
-Launch the GUI application:
-
-```bash
-python gui_application.py --model path/to/model.pth
-```
-
-The GUI provides four tabs:
-1. **Image Processing** - Process individual images
-2. **Video Processing** - Process video files, webcam feeds, or RTSP streams
-3. **Batch Processing** - Process multiple images in a directory
-4. **Settings** - Configure model and application settings
-
-## Training Your Own Model
-
-### Data Preparation
+#### Data Preparation
 
 1. Download and extract the ShanghaiTech dataset
 2. Organize the dataset structure as shown in the File Structure section
-3. Run the dataset preparation script to generate density maps:
+3. Run the dataset preparation script:
 ```bash
 python prepare_shanghai_dataset.py --dataset-path data/ShanghaiTech --output-path data/processed --part A --visualize
 ```
-   - For Part B dataset, use `--part B`
-   - Add `--adaptive` flag to use adaptive Gaussian kernels
-   - Add `--visualize` flag to generate visualization of density maps
 
-4. Verify the generated density maps match the annotations
+#### Training Process
 
-### Training Process
-
-1. Train the model using the training script:
+1. Train the model with optimized settings:
 ```bash
-python csrnet_implementation.py --mode train --data-path data/processed --epochs 50 --batch-size 8 --lr 1e-5
+python csrnet_implementation.py \
+    --mode train \
+    --data-path data/processed \
+    --epochs 100 \
+    --batch-size 32 \
+    --num-workers 8 \
+    --cache-size 2000 \
+    --prefetch-factor 3 \
+    --patience 15
 ```
-2. Monitor the loss and MAE (Mean Absolute Error) values
-3. Save checkpoints during training
-4. Select the best model based on validation performance
 
-## Pre-trained Model
+2. Monitor training progress:
+   - Training and validation loss
+   - MAE (Mean Absolute Error)
+   - Memory usage
+   - Batch processing time
 
-A pre-trained model is available for download:
-- [CSRNet Pre-trained Model](https://drive.google.com/file/d/your-model-file/view)
-- Trained on ShanghaiTech dataset Part A and Part B
-- Handles diverse crowd scenes from sparse to dense crowds
+3. The model will automatically:
+   - Save the best model based on MAE
+   - Apply early stopping if no improvement
+   - Clear cache periodically to manage memory
+   - Use the best available hardware
 
-## Extending the System
+## Model Architecture
 
-### Supporting New Annotation Formats
+The enhanced CSRNet implementation includes:
 
-Edit the `parse_annotations` function in `prepare_shanghai_dataset.py` to support your annotation format.
+1. **Attention Mechanism**:
+   - Multi-scale attention modules
+   - Channel-wise attention for feature refinement
+   - Spatial attention for head localization
 
-### Customizing the Model Architecture
+2. **Batch Normalization**:
+   - Applied at multiple network stages
+   - Improves training stability
+   - Better feature normalization
 
-Modify the `CSRNet` class in `csrnet_implementation.py` to adjust the network architecture.
+3. **Loss Function**:
+   - Combined MSE and L1 loss
+   - Gradient loss for better density map quality
+   - Adaptive weighting of loss components
 
-### Adding New Features
-
-The modular design allows for easy extension:
-- Add new processing modes to `video_processing.py`
-- Enhance the GUI by modifying `gui_application.py`
-- Implement additional analysis tools in `model_evaluation.py`
+4. **Data Augmentation**:
+   - Random horizontal flips
+   - Random rotations
+   - Color jittering
+   - Random affine transformations
+   - Random perspective changes
+   - Gaussian blur
 
 ## Troubleshooting
 
 ### Common Issues
 
-1. **CUDA out of memory**
-   - Reduce batch size
-   - Use input images with lower resolution
-   - Process video at lower frame rates
-   - The system will automatically fall back to CPU if CUDA is unavailable
+1. **Memory Issues**:
+   - Reduce cache size
+   - Decrease batch size
+   - Use fewer workers
+   - Enable periodic cache clearing
 
-2. **Poor counting accuracy**
-   - Ensure proper data preparation with accurate annotations
-   - Train for more epochs
+2. **Training Stability**:
    - Adjust learning rate
-   - Try using a pre-trained VGG16 backbone
+   - Modify patience for early stopping
+   - Tune loss weights
+   - Check batch normalization layers
 
-3. **Low performance on video**
-   - Reduce processing resolution
-   - Skip frames (process every Nth frame)
-   - Use a more powerful GPU
-   - The system will automatically use the best available hardware
-
-4. **Device-specific issues**
-   - For NVIDIA GPUs: Ensure CUDA toolkit is properly installed
-   - For Apple Silicon: Ensure PyTorch is built with MPS support
-   - For CPU: Processing will be slower but still functional
+3. **Performance Issues**:
+   - Increase prefetch factor
+   - Enable pinned memory
+   - Use persistent workers
+   - Optimize data loading pipeline
 
 ## References
 
-- [CSRNet: Dilated Convolutional Neural Networks for Understanding the Highly Congested Scenes](https://arxiv.org/abs/1802.10062) - Original paper by Y. Li et al.
-- [ShanghaiTech Dataset](https://www.cv-foundation.org/openaccess/content_cvpr_2016/papers/Zhang_Single-Image_Crowd_Counting_CVPR_2016_paper.pdf) - Dataset used for training and evaluation
-- [PyTorch](https://pytorch.org/) - Deep learning framework used in this implementation
-
-## Acknowledgements
-
-- The CSRNet implementation is based on the original paper by Y. Li, X. Zhang, and D. Chen
-- The density map generation approach follows established methods in crowd counting literature
-- Special thanks to the crowd counting research community for advancing this field
+- [CSRNet: Dilated Convolutional Neural Networks for Understanding the Highly Congested Scenes](https://arxiv.org/abs/1802.10062)
+- [ShanghaiTech Dataset](https://www.cv-foundation.org/openaccess/content_cvpr_2016/papers/Zhang_Single-Image_Crowd_Counting_CVPR_2016_paper.pdf)
+- [PyTorch](https://pytorch.org/)
 
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
 
-## Citation
-
-If you use this code in your research, please cite the original CSRNet paper:
-
-```
-@inproceedings{li2018csrnet,
-  title={CSRNet: Dilated convolutional neural networks for understanding the highly congested scenes},
-  author={Li, Yuhong and Zhang, Xiaofan and Chen, Deming},
-  booktitle={Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition},
-  pages={1091--1100},
-  year={2018}
-}
-```
-
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
 
 ## Contact
 
