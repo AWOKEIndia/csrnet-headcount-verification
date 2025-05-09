@@ -425,9 +425,10 @@ def main():
     model = load_model(args.model, device)
 
     # Determine calibration factor
-    calibration_factor = args.calibration_factor
     if args.calibration_data:
         calibration_factor = calibrate_model(model, args.calibration_data, device)
+    else:
+        calibration_factor = args.calibration_factor
 
     # Process images
     if args.image:

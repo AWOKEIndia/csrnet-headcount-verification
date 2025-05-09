@@ -204,7 +204,7 @@ def create_density_map_gaussian(points, height, width, sigma=15):
             density_map[y_top:y_bottom, x_left:x_right] += gaussian_kernel
 
     # Scale density map to match head count
-    density_map = density_map * len(points)
+    # density_map = density_map * len(points)
 
     return density_map
 
