@@ -182,6 +182,42 @@ def validate(model, val_loader, criterion, device):
 
     return val_loss, mae, rmse
 
+def plot_metrics(metrics_history, save_path):
+    """Plot and save training metrics"""
+    plt.figure(figsize=(15, 5))
+
+    # Plot losses
+    plt.subplot(1, 3, 1)
+    plt.plot(metrics_history['train_loss'], label='Train Loss')
+    plt.plot(metrics_history['val_loss'], label='Val Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Training and Validation Loss')
+    plt.legend()
+    plt.grid(True)
+
+    # Plot MAE
+    plt.subplot(1, 3, 2)
+    plt.plot(metrics_history['mae'], label='MAE')
+    plt.xlabel('Epoch')
+    plt.ylabel('MAE')
+    plt.title('Mean Absolute Error')
+    plt.legend()
+    plt.grid(True)
+
+    # Plot RMSE
+    plt.subplot(1, 3, 3)
+    plt.plot(metrics_history['rmse'], label='RMSE')
+    plt.xlabel('Epoch')
+    plt.ylabel('RMSE')
+    plt.title('Root Mean Square Error')
+    plt.legend()
+    plt.grid(True)
+
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+
 def main():
     parser = argparse.ArgumentParser(description='Train CSRNet for crowd counting')
     parser.add_argument('--epochs', type=int, default=100, help='number of epochs')
@@ -200,6 +236,18 @@ def main():
 
     # Create model directory
     os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
+
+    # Create visualization directory
+    vis_dir = os.path.join(os.path.dirname(args.model_path), 'visualizations')
+    os.makedirs(vis_dir, exist_ok=True)
+
+    # Initialize metrics history
+    metrics_history = {
+        'train_loss': [],
+        'val_loss': [],
+        'mae': [],
+        'rmse': []
+    }
 
     # Set device
     device = get_device()
@@ -274,12 +322,22 @@ def main():
         # Validate
         val_loss, mae, rmse = validate(model, val_loader, criterion, device)
 
+        # Update metrics history
+        metrics_history['train_loss'].append(train_loss)
+        metrics_history['val_loss'].append(val_loss)
+        metrics_history['mae'].append(mae)
+        metrics_history['rmse'].append(rmse)
+
         # Print metrics
         print(f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
         print(f"MAE: {mae:.2f}, RMSE: {rmse:.2f}")
 
         # Update learning rate
         scheduler.step(val_loss)
+
+        # Plot and save metrics every 5 epochs
+        if (epoch + 1) % 5 == 0:
+            plot_metrics(metrics_history, os.path.join(vis_dir, f'metrics_epoch_{epoch+1}.png'))
 
         # Save best model
         if mae < best_mae:
@@ -300,6 +358,8 @@ def main():
             with open(os.path.splitext(args.model_path)[0] + '_info.json', 'w') as f:
                 json.dump(info, f, indent=4)
 
+    # Plot final metrics
+    plot_metrics(metrics_history, os.path.join(vis_dir, 'final_metrics.png'))
     print("Training completed!")
 
 if __name__ == '__main__':
