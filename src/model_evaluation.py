@@ -24,12 +24,31 @@ from utils.logging_utils import setup_logger
 # Setup logging
 logger = setup_logger('model_evaluation', 'logs/evaluation.log')
 
+def get_best_device():
+    """
+    Automatically detect and return the best available device
+    Priority: CUDA > MPS > CPU
+    """
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+        logger.info(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
+        # Enable memory efficient settings for CUDA
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False
+    elif torch.backends.mps.is_available():
+        device = torch.device('mps')
+        logger.info("Using Apple Metal (MPS) device")
+    else:
+        device = torch.device('cpu')
+        logger.info("Using CPU device")
+    return device
+
 class ModelEvaluator:
-    def __init__(self, model_path, device='cuda'):
+    def __init__(self, model_path):
         """
-        Initialize the model evaluator
+        Initialize the model evaluator with automatic device detection
         """
-        self.device = device
+        self.device = get_best_device()
         self.model = self._load_model(model_path)
         self.transform = transforms.Compose([
             transforms.ToTensor(),
@@ -38,13 +57,28 @@ class ModelEvaluator:
 
     def _load_model(self, model_path):
         """
-        Load the CSRNet model
+        Load the CSRNet model with proper device handling
         """
         try:
             model = CSRNet().to(self.device)
-            model.load_state_dict(torch.load(model_path, map_location=self.device))
+
+            # Load state dict with proper device mapping
+            state_dict = torch.load(model_path, map_location=self.device)
+
+            # Handle potential device mismatch in state dict
+            if self.device.type == 'mps':
+                # Convert CUDA tensors to CPU first for MPS
+                state_dict = {k: v.cpu() for k, v in state_dict.items()}
+
+            model.load_state_dict(state_dict)
             model.eval()
-            logger.info(f"Successfully loaded model from {model_path}")
+
+            # Enable memory efficient inference if using CUDA
+            if self.device.type == 'cuda':
+                model = model.half()  # Use FP16 for better memory efficiency
+                torch.cuda.empty_cache()
+
+            logger.info(f"Successfully loaded model from {model_path} on {self.device}")
             return model
         except Exception as e:
             logger.error(f"Error loading model: {str(e)}")
@@ -316,20 +350,10 @@ def main():
     parser.add_argument('--image', type=str, help='Path to input image (for single mode)')
     parser.add_argument('--image-dir', type=str, help='Directory containing images to process (for batch mode)')
     parser.add_argument('--output-dir', type=str, default='output', help='Directory to save results')
-    parser.add_argument('--device', type=str, default='cuda', choices=['cuda', 'cpu', 'mps'],
-                        help='Device to use (cuda, cpu, or mps)')
     args = parser.parse_args()
 
-    # Check device availability
-    if args.device == 'cuda' and not torch.cuda.is_available():
-        logger.warning("CUDA is not available, using CPU instead.")
-        args.device = 'cpu'
-    elif args.device == 'mps' and not torch.backends.mps.is_available():
-        logger.warning("MPS is not available, using CPU instead.")
-        args.device = 'cpu'
-
     try:
-        evaluator = ModelEvaluator(args.model, args.device)
+        evaluator = ModelEvaluator(args.model)
 
         if args.mode == 'evaluate':
             if not args.test_dir:

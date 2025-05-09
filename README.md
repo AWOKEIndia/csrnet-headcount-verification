@@ -11,12 +11,16 @@ The CSRNet Headcount Verification System allows you to:
 3. Process individual images, video files, webcam feeds, or RTSP streams
 4. Batch process multiple images
 5. Use a convenient GUI interface for all functionality
+6. Automatically utilize the best available hardware (CUDA GPU, Apple Metal, or CPU)
 
 ## Requirements
 
 - Python 3.6+
 - PyTorch 1.7+
-- CUDA-enabled GPU (recommended for better performance)
+- Hardware Support:
+  - NVIDIA GPU with CUDA support (recommended for best performance)
+  - Apple Silicon (M1/M2/M3) with Metal support
+  - CPU (fallback option)
 - Additional dependencies (see Installation section)
 
 ## Installation
@@ -86,6 +90,11 @@ python csrnet_implementation.py --mode train --data-path data/processed --epochs
 ```bash
 python model_evaluation.py --model path/to/model.pth --mode evaluate --test-dir path/to/test/data --output-dir path/to/results
 ```
+
+The system will automatically detect and use the best available hardware:
+- NVIDIA GPU with CUDA support (if available)
+- Apple Silicon GPU with Metal support (if available)
+- CPU (as fallback)
 
 #### Processing a Single Image
 
@@ -187,6 +196,7 @@ The modular design allows for easy extension:
    - Reduce batch size
    - Use input images with lower resolution
    - Process video at lower frame rates
+   - The system will automatically fall back to CPU if CUDA is unavailable
 
 2. **Poor counting accuracy**
    - Ensure proper data preparation with accurate annotations
@@ -198,6 +208,12 @@ The modular design allows for easy extension:
    - Reduce processing resolution
    - Skip frames (process every Nth frame)
    - Use a more powerful GPU
+   - The system will automatically use the best available hardware
+
+4. **Device-specific issues**
+   - For NVIDIA GPUs: Ensure CUDA toolkit is properly installed
+   - For Apple Silicon: Ensure PyTorch is built with MPS support
+   - For CPU: Processing will be slower but still functional
 
 ## References
 
