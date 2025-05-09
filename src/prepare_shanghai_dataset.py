@@ -1,18 +1,20 @@
+import argparse
+import glob
+import json
 import os
+import shutil
+from pathlib import Path
+
+import cv2
+import matplotlib.pyplot as plt
 import numpy as np
 import scipy.io as sio
-import cv2
-from PIL import Image
-import glob
-import argparse
-import shutil
-from tqdm import tqdm
-import matplotlib.pyplot as plt
-from pathlib import Path
 import torch
 import torch.nn.functional as F
+from PIL import Image
 from torchvision import transforms
-import json
+from tqdm import tqdm
+
 
 def get_device():
     """
@@ -87,9 +89,6 @@ def create_density_map_gaussian(points, height, width, sigma=15):
             # Add to density map
             density_map[y_top:y_bottom, x_left:x_right] += gaussian_kernel
 
-    # Scale density map to match head count
-    density_map = density_map * len(points)
-
     return density_map
 
 def create_density_map_adaptive(points, height, width, k=3):
@@ -147,9 +146,6 @@ def create_density_map_adaptive(points, height, width, k=3):
 
             # Add to density map
             density_map[y_top:y_bottom, x_left:x_right] += gaussian_kernel
-
-    # Scale density map to match head count
-    density_map = density_map * len(points)
 
     return density_map
 
@@ -220,9 +216,6 @@ def gpu_create_density_map(points, height, width, sigma=15, device=None):
 
                     # Add to density map
                     density_map[y_top:y_bottom, x_left:x_right] += gaussian
-
-    # Scale to match point count
-    density_map = density_map * len(points)
 
     return density_map.cpu().numpy()
 
@@ -440,7 +433,7 @@ def prepare_shanghai_tech(dataset_path, output_path, part='A', use_adaptive=Fals
             # Density map
             plt.subplot(1, 3, 2)
             plt.imshow(density_map, cmap='jet')
-            plt.title(f'Density Map (Sum: {np.sum(density_map):.2f})')
+            plt.title(f'Density Map (Count: {len(points)}, Sum: {np.sum(density_map):.2f})')
             plt.axis('off')
             plt.colorbar()
 
@@ -580,7 +573,7 @@ def prepare_shanghai_tech(dataset_path, output_path, part='A', use_adaptive=Fals
             # Density map
             plt.subplot(1, 3, 2)
             plt.imshow(density_map, cmap='jet')
-            plt.title(f'Density Map (Sum: {np.sum(density_map):.2f})')
+            plt.title(f'Density Map (Count: {len(points)}, Sum: {np.sum(density_map):.2f})')
             plt.axis('off')
             plt.colorbar()
 
