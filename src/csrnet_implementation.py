@@ -21,9 +21,29 @@ import gc
 from datetime import datetime
 import json
 from torch.profiler import profile, record_function, ProfilerActivity
+import logging
+import pandas as pd
+from pathlib import Path
 
 # Disable SSL certificate verification for downloading pre-trained weights
 ssl._create_default_https_context = ssl._create_unverified_context
+
+# Setup logging
+def setup_logger(name, log_file, level=logging.INFO):
+    """Setup logger with proper formatting"""
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler = logging.FileHandler(log_file)
+    handler.setFormatter(formatter)
+
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+    logger.addHandler(handler)
+
+    return logger
+
+# Create logs directory if it doesn't exist
+os.makedirs('logs', exist_ok=True)
+logger = setup_logger('csrnet', 'logs/csrnet.log')
 
 def get_device():
     """
@@ -40,36 +60,23 @@ def get_device():
         print("Using CPU")
         return torch.device("cpu")
 
-class AttentionModule(nn.Module):
-    def __init__(self, in_channels):
-        super(AttentionModule, self).__init__()
-        if in_channels == 1:
-            # For single channel, use a simpler attention mechanism
-            self.conv1 = nn.Conv2d(1, 1, kernel_size=3, padding=1)
-            self.sigmoid = nn.Sigmoid()
-        else:
-            # For multi-channel inputs
-            self.conv1 = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
-            self.conv2 = nn.Conv2d(in_channels // 8, 1, kernel_size=1)
-            self.sigmoid = nn.Sigmoid()
+class SpatialAttention(nn.Module):
+    def __init__(self, kernel_size=7):
+        super(SpatialAttention, self).__init__()
+        self.conv = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=kernel_size//2)
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        if x.size(1) == 1:
-            # Simple attention for single channel
-            attention = self.conv1(x)
-            attention = self.sigmoid(attention)
-            return x * attention
-        else:
-            # Multi-channel attention
-            attention = self.conv1(x)
-            attention = F.relu(attention)
-            attention = self.conv2(attention)
-            attention = self.sigmoid(attention)
-            return x * attention
+        # Generate attention map
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        x_cat = torch.cat([avg_out, max_out], dim=1)
+        attention = self.sigmoid(self.conv(x_cat))
+        return x * attention
 
 class CSRNet(nn.Module):
     """
-    CSRNet: Dilated Convolutional Neural Networks for Understanding the Highly Congested Scenes
+    Enhanced CSRNet with improved attention mechanisms and feature extraction
     """
     def __init__(self, load_weights=False):
         super(CSRNet, self).__init__()
@@ -79,54 +86,65 @@ class CSRNet(nn.Module):
         self.frontend = self._make_layers(self.frontend_feat)
         self.backend = self._make_layers(self.backend_feat, in_channels=512, dilation=True)
 
-        # Add attention modules with correct channel dimensions
-        self.attention1 = AttentionModule(512)  # After frontend
-        self.attention2 = AttentionModule(64)   # After backend
-        self.attention3 = AttentionModule(1)    # After output layer
+        # Enhanced attention modules
+        self.spatial_attention1 = SpatialAttention()
+        self.spatial_attention2 = SpatialAttention()
+        self.spatial_attention3 = SpatialAttention()
 
+        # Batch normalization layers
+        self.bn1 = nn.BatchNorm2d(512)
+        self.bn2 = nn.BatchNorm2d(64)
+        self.bn3 = nn.BatchNorm2d(1)
+
+        # Output layer with improved initialization
         self.output_layer = nn.Conv2d(64, 1, kernel_size=1)
+        nn.init.normal_(self.output_layer.weight, std=0.01)
+        nn.init.constant_(self.output_layer.bias, 0)
 
-        # Add batch normalization with correct channel dimensions
-        self.bn1 = nn.BatchNorm2d(512)  # After frontend
-        self.bn2 = nn.BatchNorm2d(64)   # After backend
-        self.bn3 = nn.BatchNorm2d(1)    # After output layer
+        # Upsampling layer to match target size
+        self.upsample = nn.Upsample(size=(384, 384), mode='bilinear', align_corners=True)
 
         if load_weights:
-            try:
-                # Load pretrained VGG16 weights
-                vgg16 = models.vgg16(weights='VGG16_Weights.IMAGENET1K_V1')
-                self._initialize_weights()
+            self._load_pretrained_weights()
 
-                # Copy VGG16 weights to frontend
-                vgg_frontend_dict = dict([(name, param) for name, param in vgg16.named_parameters()])
-                frontend_state_dict = self.frontend.state_dict()
+    def _load_pretrained_weights(self):
+        try:
+            vgg16 = models.vgg16(weights='VGG16_Weights.IMAGENET1K_V1')
+            self._initialize_weights()
 
-                for name, param in frontend_state_dict.items():
-                    if name in vgg_frontend_dict:
-                        frontend_state_dict[name].copy_(vgg_frontend_dict[name])
+            # Copy VGG16 weights to frontend
+            vgg_frontend_dict = dict([(name, param) for name, param in vgg16.named_parameters()])
+            frontend_state_dict = self.frontend.state_dict()
 
-                self.frontend.load_state_dict(frontend_state_dict)
-                print("Successfully loaded pre-trained VGG16 weights")
-            except Exception as e:
-                print(f"Warning: Could not load pre-trained weights: {e}")
-                print("Initializing weights randomly")
-                self._initialize_weights()
+            for name, param in frontend_state_dict.items():
+                if name in vgg_frontend_dict:
+                    frontend_state_dict[name].copy_(vgg_frontend_dict[name])
+
+            self.frontend.load_state_dict(frontend_state_dict)
+            print("Successfully loaded pre-trained VGG16 weights")
+        except Exception as e:
+            print(f"Warning: Could not load pre-trained weights: {e}")
+            print("Initializing weights randomly")
+            self._initialize_weights()
 
     def forward(self, x):
-        # Frontend
+        # Frontend with attention
         x = self.frontend(x)
         x = self.bn1(x)
-        x = self.attention1(x)
+        x = self.spatial_attention1(x)
 
-        # Backend
+        # Backend with attention
         x = self.backend(x)
         x = self.bn2(x)
-        x = self.attention2(x)
+        x = self.spatial_attention2(x)
 
-        # Output
+        # Output with attention
         x = self.output_layer(x)
         x = self.bn3(x)
-        x = self.attention3(x)
+        x = self.spatial_attention3(x)
+
+        # Upsample to match target size
+        x = self.upsample(x)
 
         return x
 
@@ -148,22 +166,20 @@ class CSRNet(nn.Module):
     def _initialize_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.normal_(m.weight, std=0.01)
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.BatchNorm2d):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
-
 class CrowdDataset(Dataset):
     """
-    Dataset class for crowd counting
+    Enhanced dataset class for crowd counting with improved preprocessing
     """
     def __init__(self, image_root, density_map_root, transform=None, target_size=(384, 384), cache_size=1000):
         self.image_root = image_root
         self.density_map_root = density_map_root
-        self.transform = transform
         self.target_size = target_size
         self.cache_size = cache_size
 
@@ -175,16 +191,23 @@ class CrowdDataset(Dataset):
         self.image_files = sorted(glob.glob(os.path.join(image_root, '*.jpg')))
         self.density_map_files = sorted(glob.glob(os.path.join(density_map_root, '*.npy')))
 
-        # Enhanced data augmentation with more variations
+        # Default transform if none provided
+        if transform is None:
+            self.transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            ])
+        else:
+            self.transform = transform
+
+        # Training augmentation
         self.augmentation = transforms.Compose([
             transforms.RandomHorizontalFlip(),
             transforms.RandomRotation(15),
-            transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
-            transforms.RandomAffine(degrees=0, translate=(0.2, 0.2), scale=(0.8, 1.2)),
-            transforms.RandomPerspective(distortion_scale=0.3),
-            transforms.RandomApply([transforms.GaussianBlur(kernel_size=3)], p=0.3),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1),
+            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),
+            transforms.RandomPerspective(distortion_scale=0.2),
+            transforms.RandomApply([transforms.GaussianBlur(kernel_size=3)], p=0.2),
         ])
 
         assert len(self.image_files) == len(self.density_map_files), "Number of images and density maps don't match!"
@@ -194,9 +217,11 @@ class CrowdDataset(Dataset):
         if idx in self.cache:
             return self.cache[idx]
 
+        # Load and preprocess image
         img = Image.open(self.image_files[idx]).convert('RGB')
         img = img.resize(self.target_size, Image.BILINEAR)
 
+        # Load and preprocess density map
         density_map = np.load(self.density_map_files[idx])
         density_map = cv2.resize(density_map, self.target_size, interpolation=cv2.INTER_CUBIC)
 
@@ -204,14 +229,15 @@ class CrowdDataset(Dataset):
         scale_factor = (self.target_size[0] * self.target_size[1]) / (density_map.shape[0] * density_map.shape[1])
         density_map = density_map * scale_factor
 
-        if self.transform is not None:
-            img = self.augmentation(img)
+        # Apply data augmentation
+        img = self.augmentation(img)
 
+        # Convert to tensor and normalize
+        img = self.transform(img)
         density_map = torch.from_numpy(density_map).float().unsqueeze(0)
 
         # Cache the result
         if len(self.cache) >= self.cache_size:
-            # Remove oldest item from cache
             oldest_key = self.cache_keys.pop(0)
             del self.cache[oldest_key]
 
@@ -226,18 +252,20 @@ class CrowdDataset(Dataset):
     def __len__(self):
         return len(self.image_files)
 
-
 def create_density_map_gaussian(points, height, width, sigma=15):
     """
-    Enhanced density map generation with adaptive sigma based on crowd density
+    Enhanced density map generation with adaptive sigma and improved accuracy
     """
     density_map = np.zeros((height, width), dtype=np.float32)
+
+    if len(points) == 0:
+        return density_map
 
     # Calculate local density
     local_density = np.zeros((height, width), dtype=np.float32)
     for point in points:
         x, y = int(point[0]), int(point[1])
-        if x < width and y < height:
+        if 0 <= x < width and 0 <= y < height:
             local_density[y, x] += 1
 
     # Apply Gaussian blur to get density estimate
@@ -246,462 +274,422 @@ def create_density_map_gaussian(points, height, width, sigma=15):
     # Generate density map with adaptive sigma
     for point in points:
         x, y = int(point[0]), int(point[1])
-        if x < width and y < height:
+        if 0 <= x < width and 0 <= y < height:
             # Adaptive sigma based on local density
-            local_sigma = max(5, min(20, sigma * (1 + density_estimate[y, x])))
+            local_sigma = sigma * (1 + 0.1 * density_estimate[y, x])
 
-            gaussian_kernel = np.zeros((height, width), dtype=np.float32)
-            gaussian_kernel[y, x] = 1
-            gaussian_kernel = cv2.GaussianBlur(gaussian_kernel, (int(local_sigma), int(local_sigma)), 0)
-            gaussian_kernel = gaussian_kernel / np.sum(gaussian_kernel)
+            # Create Gaussian kernel
+            x_grid, y_grid = np.meshgrid(np.arange(width), np.arange(height))
+            gaussian = np.exp(-((x_grid - x)**2 + (y_grid - y)**2) / (2 * local_sigma**2))
+            gaussian = gaussian / (2 * np.pi * local_sigma**2)
 
-            density_map += gaussian_kernel
+            density_map += gaussian
+
+    # Normalize density map
+    if np.sum(density_map) > 0:
+        density_map = density_map / np.sum(density_map) * len(points)
 
     return density_map
 
-
-class PerformanceMonitor:
-    def __init__(self, log_dir='logs'):
+class MetricsLogger:
+    """Class to handle metrics logging and visualization"""
+    def __init__(self, log_dir='logs/metrics'):
         self.log_dir = log_dir
         os.makedirs(log_dir, exist_ok=True)
+
+        # Initialize metrics storage
         self.metrics = {
             'train_loss': [],
             'val_loss': [],
             'mae': [],
-            'epoch_time': [],
+            'mse': [],
+            'rmse': [],
+            'learning_rate': [],
+            'batch_time': [],
             'memory_usage': [],
-            'gpu_memory': [],
-            'batch_times': []
+            'epoch_time': []
         }
-        self.start_time = None
-        self.batch_times = []
 
-    def start_epoch(self):
-        self.start_time = time.time()
-        self.batch_times = []
+        # Create timestamp for this run
+        self.timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        self.metrics_file = os.path.join(log_dir, f'metrics_{self.timestamp}.csv')
 
-    def end_epoch(self):
-        epoch_time = time.time() - self.start_time
-        self.metrics['epoch_time'].append(epoch_time)
+        # Initialize DataFrame
+        self.df = pd.DataFrame(columns=self.metrics.keys())
 
-        # Get memory usage
-        process = psutil.Process()
-        memory_info = process.memory_info()
-        self.metrics['memory_usage'].append(memory_info.rss / 1024 / 1024)  # MB
+    def log_metrics(self, epoch, metrics_dict):
+        """Log metrics for current epoch"""
+        # Update metrics storage
+        for key, value in metrics_dict.items():
+            if key in self.metrics:
+                self.metrics[key].append(value)
 
-        # Get GPU memory if available
-        if torch.backends.mps.is_available():
-            try:
-                gpu_memory = torch.mps.current_allocated_memory() / 1024 / 1024  # MB
-                self.metrics['gpu_memory'].append(gpu_memory)
-            except:
-                self.metrics['gpu_memory'].append(0)
-        elif torch.cuda.is_available():
-            self.metrics['gpu_memory'].append(torch.cuda.memory_allocated() / 1024 / 1024)  # MB
-        else:
-            self.metrics['gpu_memory'].append(0)
+        # Update DataFrame
+        self.df.loc[epoch] = metrics_dict
 
-        # Calculate average batch time
-        if self.batch_times:
-            self.metrics['batch_times'].append(np.mean(self.batch_times))
+        # Save to CSV
+        self.df.to_csv(self.metrics_file)
 
-    def update_metrics(self, train_loss=None, val_loss=None, mae=None):
-        if train_loss is not None:
-            self.metrics['train_loss'].append(train_loss)
-        if val_loss is not None:
-            self.metrics['val_loss'].append(val_loss)
-        if mae is not None:
-            self.metrics['mae'].append(mae)
+        # Log to console
+        logger.info(f"Epoch {epoch} Metrics:")
+        for key, value in metrics_dict.items():
+            logger.info(f"{key}: {value:.4f}")
 
-    def log_batch_time(self, batch_time):
-        self.batch_times.append(batch_time)
-
-    def save_metrics(self, epoch):
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        metrics_file = os.path.join(self.log_dir, f'metrics_epoch_{epoch}_{timestamp}.json')
-
-        # Convert numpy values to Python native types
-        metrics_dict = {k: [float(x) if isinstance(x, np.float32) else x for x in v]
-                       for k, v in self.metrics.items()}
-
-        with open(metrics_file, 'w') as f:
-            json.dump(metrics_dict, f, indent=4)
-
-    def plot_metrics(self, epoch):
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    def plot_metrics(self):
+        """Generate and save metric plots"""
         plots_dir = os.path.join(self.log_dir, 'plots')
         os.makedirs(plots_dir, exist_ok=True)
 
-        # Plot training metrics
-        plt.figure(figsize=(15, 10))
-
-        # Loss plot
-        plt.subplot(2, 2, 1)
-        plt.plot(self.metrics['train_loss'], label='Train Loss')
-        plt.plot(self.metrics['val_loss'], label='Val Loss')
+        # Plot training and validation loss
+        plt.figure(figsize=(10, 6))
+        plt.plot(self.metrics['train_loss'], label='Training Loss')
+        plt.plot(self.metrics['val_loss'], label='Validation Loss')
+        plt.title('Training and Validation Loss')
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
         plt.legend()
-        plt.title('Training and Validation Loss')
+        plt.savefig(os.path.join(plots_dir, f'loss_plot_{self.timestamp}.png'))
+        plt.close()
 
-        # MAE plot
-        plt.subplot(2, 2, 2)
-        plt.plot(self.metrics['mae'])
+        # Plot MAE and RMSE
+        plt.figure(figsize=(10, 6))
+        plt.plot(self.metrics['mae'], label='MAE')
+        plt.plot(self.metrics['rmse'], label='RMSE')
+        plt.title('MAE and RMSE over Time')
         plt.xlabel('Epoch')
-        plt.ylabel('MAE')
-        plt.title('Mean Absolute Error')
+        plt.ylabel('Error')
+        plt.legend()
+        plt.savefig(os.path.join(plots_dir, f'error_plot_{self.timestamp}.png'))
+        plt.close()
 
-        # Memory usage plot
-        plt.subplot(2, 2, 3)
-        plt.plot(self.metrics['memory_usage'], label='RAM')
-        plt.plot(self.metrics['gpu_memory'], label='GPU Memory')
+        # Plot memory usage
+        plt.figure(figsize=(10, 6))
+        plt.plot(self.metrics['memory_usage'])
+        plt.title('Memory Usage over Time')
         plt.xlabel('Epoch')
         plt.ylabel('Memory (MB)')
-        plt.legend()
-        plt.title('Memory Usage')
-
-        # Batch time plot
-        plt.subplot(2, 2, 4)
-        plt.plot(self.metrics['batch_times'])
-        plt.xlabel('Epoch')
-        plt.ylabel('Time (s)')
-        plt.title('Average Batch Processing Time')
-
-        plt.tight_layout()
-        plt.savefig(os.path.join(plots_dir, f'metrics_epoch_{epoch}_{timestamp}.png'))
+        plt.savefig(os.path.join(plots_dir, f'memory_plot_{self.timestamp}.png'))
         plt.close()
+
+class PerformanceMonitor:
+    """
+    Enhanced monitor and log training performance metrics
+    """
+    def __init__(self, log_dir='logs/performance'):
+        self.batch_times = []
+        self.train_losses = []
+        self.val_losses = []
+        self.mae_scores = []
+        self.start_time = time.time()
+        self.log_dir = log_dir
+        os.makedirs(log_dir, exist_ok=True)
+
+        # Initialize profiler
+        self.profiler = None
+        self.profiler_active = False
+
+        # Initialize metrics logger
+        self.metrics_logger = MetricsLogger(log_dir)
+
+    def _get_profiler_activities(self):
+        """Get appropriate profiler activities based on available devices"""
+        activities = [ProfilerActivity.CPU]
+
+        # Check for CUDA (NVIDIA GPU)
+        if torch.cuda.is_available():
+            activities.append(ProfilerActivity.CUDA)
+            logger.info("CUDA profiling enabled")
+
+        # Check for Metal (Apple Silicon)
+        if torch.backends.mps.is_available():
+            # Note: Currently PyTorch profiler doesn't directly support MPS
+            # We'll use CPU profiling for MPS operations
+            logger.info("MPS (Metal) device detected - using CPU profiling for MPS operations")
+
+        return activities
+
+    def start_profiling(self):
+        """Start profiling"""
+        if not self.profiler_active:
+            try:
+                self.profiler = profile(
+                    activities=self._get_profiler_activities(),
+                    schedule=torch.profiler.schedule(
+                        wait=1,
+                        warmup=1,
+                        active=3,
+                        repeat=2
+                    ),
+                    on_trace_ready=torch.profiler.tensorboard_trace_handler(self.log_dir),
+                    record_shapes=True,
+                    profile_memory=True,
+                    with_stack=True
+                )
+                self.profiler.start()
+                self.profiler_active = True
+                logger.info(f"Started profiling with activities: {self._get_profiler_activities()}")
+
+                # Log device information
+                if torch.backends.mps.is_available():
+                    logger.info("Using Apple Silicon GPU (MPS)")
+                elif torch.cuda.is_available():
+                    logger.info(f"Using CUDA GPU: {torch.cuda.get_device_name(0)}")
+                else:
+                    logger.info("Using CPU")
+
+            except Exception as e:
+                logger.warning(f"Failed to start profiler: {str(e)}")
+
+    def stop_profiling(self):
+        """Stop profiling"""
+        if self.profiler_active and self.profiler is not None:
+            try:
+                self.profiler.stop()
+                self.profiler.step()
+                self.profiler_active = False
+                logger.info("Stopped profiling")
+            except Exception as e:
+                logger.warning(f"Failed to stop profiler: {str(e)}")
+
+    def log_batch_time(self, batch_time):
+        """Log the time taken for a batch"""
+        self.batch_times.append(batch_time)
+
+    def update_metrics(self, train_loss, val_loss, mae, learning_rate=None):
+        """Update training metrics"""
+        self.train_losses.append(train_loss)
+        if val_loss is not None:
+            self.val_losses.append(val_loss)
+        if mae is not None:
+            self.mae_scores.append(mae)
+
+        # Log metrics
+        metrics_dict = {
+            'train_loss': train_loss,
+            'val_loss': val_loss if val_loss is not None else float('nan'),
+            'mae': mae if mae is not None else float('nan'),
+            'learning_rate': learning_rate if learning_rate is not None else float('nan'),
+            'batch_time': self.get_average_batch_time(),
+            'memory_usage': self.get_memory_usage(),
+            'epoch_time': self.get_elapsed_time()
+        }
+
+        self.metrics_logger.log_metrics(len(self.train_losses) - 1, metrics_dict)
+
+    def get_average_batch_time(self):
+        """Get average batch processing time"""
+        return np.mean(self.batch_times) if self.batch_times else 0
+
+    def get_memory_usage(self):
+        """Get current memory usage"""
+        if torch.cuda.is_available():
+            return torch.cuda.memory_allocated() / 1024**2  # MB
+        elif torch.backends.mps.is_available():
+            # For MPS, we can only get CPU memory usage
+            return psutil.Process().memory_info().rss / 1024**2  # MB
+        return psutil.Process().memory_info().rss / 1024**2  # MB
+
+    def get_elapsed_time(self):
+        """Get total elapsed time"""
+        return time.time() - self.start_time
+
+    def log_performance(self, epoch):
+        """Log current performance metrics"""
+        logger.info(f"\nPerformance Metrics (Epoch {epoch}):")
+        logger.info(f"Average Batch Time: {self.get_average_batch_time():.3f}s")
+        logger.info(f"Memory Usage: {self.get_memory_usage():.1f}MB")
+        logger.info(f"Elapsed Time: {self.get_elapsed_time():.1f}s")
+        if self.mae_scores:
+            logger.info(f"Current MAE: {self.mae_scores[-1]:.4f}")
+
+        # Generate plots
+        self.metrics_logger.plot_metrics()
 
 def train(model, train_loader, optimizer, epoch, device, monitor):
     """
-    Enhanced training function with improved loss calculation
+    Enhanced training function with improved loss calculation and monitoring
     """
     model.train()
-    train_loss = 0
-    monitor.start_epoch()
+    total_loss = 0
+    batch_time = 0
+    data_time = 0
 
-    for batch_idx, (data, target) in enumerate(tqdm(train_loader)):
-        batch_start = time.time()
+    end = time.time()
 
-        data, target = data.to(device), target.to(device)
-        optimizer.zero_grad()
+    try:
+        monitor.start_profiling()
 
-        with record_function("model_forward"):
-            output = model(data)
+        for i, (img, target) in enumerate(train_loader):
+            data_time = time.time() - end
 
-        if output.size() != target.size():
-            output = F.interpolate(output, size=target.size()[2:], mode='bilinear', align_corners=False)
+            img = img.to(device)
+            target = target.to(device)
 
-        # Combined loss function
-        mse_loss = F.mse_loss(output, target)
+            # Forward pass
+            with record_function("model_inference"):
+                output = model(img)
 
-        # Add L1 loss for better count accuracy
-        l1_loss = F.l1_loss(output, target)
+            # Calculate loss with L1 and L2 components
+            l1_loss = F.l1_loss(output, target)
+            l2_loss = F.mse_loss(output, target)
+            loss = l1_loss + 0.1 * l2_loss
 
-        # Add gradient loss for better density map quality
-        gradient_loss = torch.mean(torch.abs(
-            torch.diff(output, dim=2) - torch.diff(target, dim=2)
-        )) + torch.mean(torch.abs(
-            torch.diff(output, dim=3) - torch.diff(target, dim=3)
-        ))
+            # Backward pass
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-        # Combine losses with weights
-        loss = mse_loss + 0.5 * l1_loss + 0.1 * gradient_loss
+            total_loss += loss.item()
+            batch_time = time.time() - end
+            end = time.time()
 
-        loss.backward()
+            # Update monitoring
+            monitor.log_batch_time(batch_time)
 
-        # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            if i % 10 == 0:
+                logger.info(f'Epoch: [{epoch}][{i}/{len(train_loader)}]\t'
+                           f'Loss {loss.item():.4f}\t'
+                           f'Time {batch_time:.3f}s')
+    finally:
+        monitor.stop_profiling()
 
-        optimizer.step()
-
-        train_loss += loss.item()
-
-        batch_time = time.time() - batch_start
-        monitor.log_batch_time(batch_time)
-
-        if batch_idx % 10 == 0:
-            print(f'Train Epoch: {epoch} [{batch_idx * len(data)}/{len(train_loader.dataset)} '
-                  f'({100. * batch_idx / len(train_loader):.0f}%)]\tLoss: {loss.item():.6f}')
-
-    train_loss /= len(train_loader)
-    print(f'Train Epoch: {epoch}, Average Loss: {train_loss:.6f}')
-
-    monitor.end_epoch()
-    return train_loss
-
+    return total_loss / len(train_loader)
 
 def validate(model, val_loader, device):
     """
-    Validation function
+    Enhanced validation function with improved metrics
     """
     model.eval()
-    val_loss = 0
     mae = 0
+    mse = 0
 
     with torch.no_grad():
-        for data, target in tqdm(val_loader):
-            data, target = data.to(device), target.to(device)
-            output = model(data)
+        for img, target in val_loader:
+            img = img.to(device)
+            target = target.to(device)
 
-            # Ensure output and target have the same size
-            if output.size() != target.size():
-                output = F.interpolate(output, size=target.size()[2:], mode='bilinear', align_corners=False)
+            output = model(img)
 
-            # MSE Loss
-            val_loss += F.mse_loss(output, target).item()
+            # Calculate metrics
+            pred_count = torch.sum(output).item()
+            gt_count = torch.sum(target).item()
 
-            # MAE (Mean Absolute Error)
-            pred_count = output.sum().item()
-            true_count = target.sum().item()
-            mae += abs(pred_count - true_count)
+            mae += abs(pred_count - gt_count)
+            mse += (pred_count - gt_count) ** 2
 
-    val_loss /= len(val_loader)
-    mae /= len(val_loader)
+    mae = mae / len(val_loader)
+    mse = mse / len(val_loader)
+    rmse = np.sqrt(mse)
 
-    print(f'Validation Loss: {val_loss:.6f}, MAE: {mae:.2f}')
-    return val_loss, mae
-
+    return mae, rmse
 
 def predict(model, image_path, device):
     """
-    Enhanced prediction function with post-processing
+    Enhanced prediction function with improved visualization
     """
+    # Load and preprocess image
+    img = Image.open(image_path).convert('RGB')
     transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
-
-    img = Image.open(image_path).convert('RGB')
     img_tensor = transform(img).unsqueeze(0).to(device)
 
+    # Make prediction
     model.eval()
     with torch.no_grad():
         output = model(img_tensor)
 
-    # Post-processing
-    output_np = output.squeeze().cpu().numpy()
+    # Process output
+    density_map = output.squeeze().cpu().numpy()
+    count = np.sum(density_map)
 
-    # Apply Gaussian smoothing to reduce noise
-    output_np = cv2.GaussianBlur(output_np, (5, 5), 0)
-
-    # Apply adaptive thresholding
-    threshold = np.mean(output_np) + 2 * np.std(output_np)
-    output_np[output_np < threshold] = 0
-
-    # Get the predicted count with confidence
-    count = np.sum(output_np)
-    confidence = np.mean(output_np[output_np > 0]) if np.any(output_np > 0) else 0
-
-    # Visualization
+    # Create visualization
     plt.figure(figsize=(15, 5))
 
-    plt.subplot(1, 3, 1)
+    # Original image
+    plt.subplot(1, 2, 1)
     plt.imshow(np.array(img))
     plt.title('Original Image')
+    plt.axis('off')
 
-    plt.subplot(1, 3, 2)
-    plt.imshow(output_np, cmap='jet')
-    plt.title(f'Density Map (Count: {count:.2f})')
+    # Density map
+    plt.subplot(1, 2, 2)
+    plt.imshow(density_map, cmap='jet')
+    plt.title(f'Predicted Density Map\nCount: {count:.2f}')
+    plt.axis('off')
     plt.colorbar()
 
-    plt.subplot(1, 3, 3)
-    plt.imshow(output_np > threshold, cmap='gray')
-    plt.title(f'Detected Heads (Confidence: {confidence:.2f})')
-
     plt.tight_layout()
-    plt.savefig('prediction_result.png')
-    plt.close()
 
-    return count, output_np
-
+    return density_map, count, plt.gcf()
 
 def main():
-    parser = argparse.ArgumentParser(description='CSRNet for Crowd Counting')
-    parser.add_argument('--batch-size', type=int, default=16, help='input batch size for training (default: 16)')
-    parser.add_argument('--epochs', type=int, default=100, help='number of epochs to train (default: 100)')
-    parser.add_argument('--lr', type=float, default=1e-4, help='learning rate (default: 1e-4)')
-    parser.add_argument('--no-cuda', action='store_true', default=False, help='disables CUDA training')
-    parser.add_argument('--seed', type=int, default=42, help='random seed (default: 42)')
-    parser.add_argument('--log-interval', type=int, default=10, help='how many batches to wait before logging training status')
-    parser.add_argument('--save-model', action='store_true', default=True, help='save the current model')
-    parser.add_argument('--data-path', type=str, default='./data', help='path to dataset')
-    parser.add_argument('--mode', type=str, default='train', choices=['train', 'test'], help='train or test mode')
-    parser.add_argument('--test-image', type=str, default=None, help='path to test image')
-    parser.add_argument('--load-model', type=str, default=None, help='path to saved model')
-    parser.add_argument('--image-size', type=int, default=384, help='input image size (default: 384)')
-    parser.add_argument('--num-workers', type=int, default=4, help='number of workers for data loading (default: 4)')
-    parser.add_argument('--profile', action='store_true', help='enable PyTorch profiler')
-    parser.add_argument('--cache-size', type=int, default=1000, help='number of images to cache in memory')
-    parser.add_argument('--prefetch-factor', type=int, default=2, help='number of batches to prefetch')
-    parser.add_argument('--pin-memory', action='store_true', default=True, help='pin memory in data loader')
-    parser.add_argument('--persistent-workers', action='store_true', default=True, help='use persistent workers')
-    parser.add_argument('--patience', type=int, default=10, help='patience for early stopping')
+    """
+    Main function with improved argument parsing and training loop
+    """
+    parser = argparse.ArgumentParser(description='CSRNet Crowd Counting')
+    parser.add_argument('--train', action='store_true', help='train the model')
+    parser.add_argument('--test', action='store_true', help='test the model')
+    parser.add_argument('--image_path', type=str, help='path to test image')
+    parser.add_argument('--model_path', type=str, default='models/csrnet.pth',
+                       help='path to save/load the model (will be created if training)')
+    parser.add_argument('--batch_size', type=int, default=8, help='batch size')
+    parser.add_argument('--epochs', type=int, default=200, help='number of epochs')
+    parser.add_argument('--lr', type=float, default=1e-5, help='learning rate')
     args = parser.parse_args()
 
-    # Set device
     device = get_device()
+    logger.info(f"Using device: {device}")
 
-    # Set random seed for reproducibility
-    torch.manual_seed(args.seed)
-    if device.type == 'cuda':
-        torch.cuda.manual_seed(args.seed)
-    elif device.type == 'mps':
-        torch.mps.manual_seed(args.seed)
+    if args.train:
+        # Create models directory if it doesn't exist
+        os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
 
-    # Create model
-    model = CSRNet(load_weights=True).to(device)
-
-    # Load model if specified
-    if args.load_model:
-        model.load_state_dict(torch.load(args.load_model, map_location=device))
-        print(f"Loaded model from {args.load_model}")
-
-    if args.mode == 'train':
-        # Initialize performance monitor
+        # Training setup
+        model = CSRNet(load_weights=True).to(device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
         monitor = PerformanceMonitor()
 
-        # Data transforms with optimizations
-        transform = transforms.Compose([
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomRotation(10),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
+        # Create data loaders
+        train_dataset = CrowdDataset('data/processed/train/images', 'data/processed/train/density_maps')
+        val_dataset = CrowdDataset('data/processed/val/images', 'data/processed/val/density_maps')
 
-        # Create datasets with consistent image size and caching
-        target_size = (args.image_size, args.image_size)
-        train_dataset = CrowdDataset(
-            os.path.join(args.data_path, 'train', 'images'),
-            os.path.join(args.data_path, 'train', 'density_maps'),
-            transform=transform,
-            target_size=target_size,
-            cache_size=args.cache_size
-        )
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=args.batch_size)
 
-        val_dataset = CrowdDataset(
-            os.path.join(args.data_path, 'val', 'images'),
-            os.path.join(args.data_path, 'val', 'density_maps'),
-            transform=transforms.Compose([
-                transforms.Resize(target_size),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-            ]),
-            target_size=target_size,
-            cache_size=args.cache_size
-        )
-
-        # Create data loaders with optimized settings
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=args.batch_size,
-            shuffle=True,
-            num_workers=args.num_workers,
-            pin_memory=args.pin_memory,
-            persistent_workers=args.persistent_workers,
-            prefetch_factor=args.prefetch_factor,
-            drop_last=True  # Drop last incomplete batch
-        )
-
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=args.batch_size,
-            shuffle=False,
-            num_workers=args.num_workers,
-            pin_memory=args.pin_memory,
-            persistent_workers=args.persistent_workers,
-            prefetch_factor=args.prefetch_factor
-        )
-
-        # Optimizer with gradient clipping and learning rate scheduling
-        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(
-            optimizer,
-            max_lr=args.lr,
-            epochs=args.epochs,
-            steps_per_epoch=len(train_loader),
-            pct_start=0.3,
-            anneal_strategy='cos'
-        )
-
-        # Initialize early stopping variables
+        # Training loop
         best_mae = float('inf')
-        patience_counter = 0
-        patience = args.patience
+        for epoch in range(args.epochs):
+            logger.info(f"\nEpoch {epoch+1}/{args.epochs}")
 
-        # Training loop with improved memory management
-        for epoch in range(1, args.epochs + 1):
-            # Clear cache periodically
-            if epoch % 5 == 0:
-                train_dataset.cache.clear()
-                train_dataset.cache_keys.clear()
-                val_dataset.cache.clear()
-                val_dataset.cache_keys.clear()
-                gc.collect()
-                if device.type == 'cuda':
-                    torch.cuda.empty_cache()
-                elif device.type == 'mps':
-                    torch.mps.empty_cache()
+            # Training phase
+            train_loss = train(model, train_loader, optimizer, epoch, device, monitor)
 
-            if args.profile and epoch == 1:
-                with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-                           schedule=torch.profiler.schedule(wait=1, warmup=1, active=3),
-                           on_trace_ready=torch.profiler.tensorboard_trace_handler('./log/profiler'),
-                           record_shapes=True,
-                           profile_memory=True,
-                           with_stack=True) as prof:
-                    train_loss = train(model, train_loader, optimizer, epoch, device, monitor)
-                    val_loss, mae = validate(model, val_loader, device)
-                    prof.step()
-            else:
-                train_loss = train(model, train_loader, optimizer, epoch, device, monitor)
-                val_loss, mae = validate(model, val_loader, device)
-
-            # Update learning rate
-            scheduler.step()
+            # Validation phase
+            mae, rmse = validate(model, val_loader, device)
 
             # Update metrics
-            monitor.update_metrics(train_loss=train_loss, val_loss=val_loss, mae=mae)
+            monitor.update_metrics(train_loss, None, mae, optimizer.param_groups[0]['lr'])
 
-            # Save metrics and plots
-            monitor.save_metrics(epoch)
-            monitor.plot_metrics(epoch)
+            logger.info(f'Epoch {epoch}: Train Loss = {train_loss:.4f}, MAE = {mae:.4f}, RMSE = {rmse:.4f}')
 
-            # Early stopping check
             if mae < best_mae:
                 best_mae = mae
-                if args.save_model:
-                    torch.save(model.state_dict(), 'csrnet_best.pth')
-                    print(f"Saved best model with MAE: {best_mae:.2f}")
-                patience_counter = 0
-            else:
-                patience_counter += 1
-                print(f"No improvement for {patience_counter} epochs. Best MAE: {best_mae:.2f}")
+                torch.save(model.state_dict(), args.model_path)
+                logger.info(f'Model saved with MAE: {mae:.4f}')
 
-            # Early stopping
-            if patience_counter >= patience:
-                print(f"Early stopping triggered after {epoch} epochs")
-                break
+            # Log performance metrics
+            monitor.log_performance(epoch)
 
-            # Save checkpoint
-            if args.save_model and epoch % 5 == 0:
-                torch.save(model.state_dict(), f'csrnet_epoch_{epoch}.pth')
+    elif args.test and args.image_path:
+        # Load model and make prediction
+        model = CSRNet().to(device)
+        model.load_state_dict(torch.load(args.model_path, map_location=device))
 
-            # Clear memory
-            if device.type == 'mps':
-                torch.mps.empty_cache()
-            elif device.type == 'cuda':
-                torch.cuda.empty_cache()
-            gc.collect()
-
-        # Save final model
-        if args.save_model:
-            torch.save(model.state_dict(), 'csrnet_final.pth')
-
-    elif args.mode == 'test' and args.test_image:
-        count, density_map = predict(model, args.test_image, device)
-        print(f"Predicted count: {count:.2f}")
-
+        density_map, count, fig = predict(model, args.image_path, device)
+        plt.show()
+        logger.info(f'Predicted count: {count:.2f}')
 
 if __name__ == '__main__':
     main()

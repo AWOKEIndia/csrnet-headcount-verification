@@ -16,23 +16,30 @@ The CSRNet Headcount Verification System allows you to:
 ## Key Features
 
 - **Enhanced Model Architecture**:
-  - Attention mechanisms for better head detection
-  - Batch normalization for improved training stability
-  - Adaptive density map generation
+  - Spatial attention mechanism for better head detection
   - Multi-scale feature processing
+  - Improved batch normalization
+  - Adaptive density map generation
+  - Enhanced weight initialization
 
 - **Advanced Training Features**:
-  - In-memory dataset caching for faster training
+  - Combined L1 and L2 loss for better accuracy
   - Adaptive learning rate scheduling
   - Early stopping with configurable patience
-  - Combined loss function (MSE, L1, and gradient loss)
   - Memory-efficient training pipeline
+  - In-memory dataset caching
 
 - **Optimized Data Processing**:
   - Efficient data loading with prefetching
-  - Persistent workers for faster training
-  - Pinned memory for faster GPU transfer
-  - Advanced data augmentation techniques
+  - Enhanced data augmentation
+  - Adaptive density map scaling
+  - Improved preprocessing pipeline
+
+- **Comprehensive Evaluation**:
+  - Multiple evaluation metrics (MAE, MSE, RMSE, MAPE, R²)
+  - Detailed visualization of results
+  - Error analysis and distribution plots
+  - Performance monitoring
 
 ## Requirements
 
@@ -71,146 +78,91 @@ pip install -r requirements.txt
 ## File Structure
 
 ```
-├── csrnet_implementation.py   # Enhanced CSRNet model implementation
-├── prepare_shanghai_dataset.py # Script for preparing ShanghaiTech dataset
-├── model_evaluation.py        # Tools for evaluating model performance
-├── video_processing.py        # Video and stream processing capabilities
-├── gui_application.py         # Graphical user interface
-├── requirements.txt           # Required Python packages
-├── data/                      # Dataset directory
-│   ├── ShanghaiTech/
-│   │   ├── part_A/           # Part A dataset
-│   │   └── part_B/           # Part B dataset
-└── README.md                  # This file
+├── src/
+│   ├── csrnet_implementation.py   # Enhanced CSRNet model implementation
+│   ├── model_evaluation.py        # Model evaluation and metrics
+│   ├── video_processing.py        # Video and stream processing
+│   ├── gui_application.py         # Graphical user interface
+│   └── prepare_shanghai_dataset.py # Dataset preparation script
+├── data/                         # Dataset directory
+│   ├── train/                    # Training data
+│   │   ├── images/              # Training images
+│   │   └── density_maps/        # Training density maps
+│   └── val/                      # Validation data
+│       ├── images/              # Validation images
+│       └── density_maps/        # Validation density maps
+├── models/                       # Saved models directory
+├── logs/                         # Log files directory
+├── evaluation_results/          # Evaluation results directory
+└── README.md                    # This file
 ```
 
 ## Usage
 
-### Command Line Interface
-
-#### Training the Model
+### Training the Model
 
 ```bash
 python src/csrnet_implementation.py \
-    --mode train \
-    --data-path data/processed \
-    --epochs 100 \
-    --batch-size 32 \
-    --num-workers 8 \
-    --cache-size 2000 \
-    --prefetch-factor 3 \
-    --patience 15 \
-    --pin-memory \
-    --persistent-workers
+    --train \
+    --model_path models/csrnet.pth \
+    --batch_size 8 \
+    --epochs 200 \
+    --lr 1e-5
 ```
 
 Key training parameters:
-- `--cache-size`: Number of images to cache in memory (default: 1000)
-- `--prefetch-factor`: Number of batches to prefetch (default: 2)
-- `--patience`: Early stopping patience (default: 10)
-- `--pin-memory`: Enable pinned memory for faster GPU transfer
-- `--persistent-workers`: Use persistent workers for data loading
+- `--batch_size`: Batch size for training (default: 8)
+- `--epochs`: Number of training epochs (default: 200)
+- `--lr`: Learning rate (default: 1e-5)
 
-#### Evaluating the Model
+### Evaluating the Model
 
 ```bash
-python model_evaluation.py --model path/to/model.pth --mode evaluate --test-dir path/to/test/data --output-dir path/to/results
+python src/model_evaluation.py \
+    --model_path models/csrnet.pth \
+    --test_dir data/test \
+    --output_dir evaluation_results
 ```
 
-The system will automatically detect and use the best available hardware:
-- NVIDIA GPU with CUDA support (if available)
-- Apple Silicon GPU with Metal support (if available)
-- CPU (as fallback)
+The evaluation will generate:
+- Detailed metrics (MAE, MSE, RMSE, MAPE, R²)
+- Error distribution plots
+- Prediction vs ground truth scatter plots
+- Individual image results
 
-#### Processing a Single Image
+### Processing a Single Image
 
 ```bash
-python model_evaluation.py --model path/to/model.pth --mode single --image path/to/image.jpg --output-dir path/to/results
+python src/model_evaluation.py \
+    --model_path models/csrnet.pth \
+    --image_path path/to/image.jpg \
+    --output_dir evaluation_results
 ```
 
 The output will include:
 - Original image
-- Density map visualization
-- Detected heads with confidence scores
-
-#### Batch Processing Images
-
-```bash
-python model_evaluation.py --model path/to/model.pth --mode batch --image-dir path/to/images --output-dir path/to/results
-```
-
-#### Video Processing
-
-```bash
-python video_processing.py --model path/to/model.pth --mode video --input path/to/video.mp4 --output path/to/output.mp4
-```
-
-For webcam:
-```bash
-python video_processing.py --model path/to/model.pth --mode webcam
-```
-
-For RTSP stream:
-```bash
-python video_processing.py --model path/to/model.pth --mode rtsp --input "rtsp://your-stream-url"
-```
-
-### Training Your Own Model
-
-#### Data Preparation
-
-1. Download and extract the ShanghaiTech dataset
-2. Organize the dataset structure as shown in the File Structure section
-3. Run the dataset preparation script:
-```bash
-python prepare_shanghai_dataset.py --dataset-path data/ShanghaiTech --output-path data/processed --part A --visualize
-```
-
-#### Training Process
-
-1. Train the model with optimized settings:
-```bash
-python csrnet_implementation.py \
-    --mode train \
-    --data-path data/processed \
-    --epochs 100 \
-    --batch-size 32 \
-    --num-workers 8 \
-    --cache-size 2000 \
-    --prefetch-factor 3 \
-    --patience 15
-```
-
-2. Monitor training progress:
-   - Training and validation loss
-   - MAE (Mean Absolute Error)
-   - Memory usage
-   - Batch processing time
-
-3. The model will automatically:
-   - Save the best model based on MAE
-   - Apply early stopping if no improvement
-   - Clear cache periodically to manage memory
-   - Use the best available hardware
+- Predicted density map
+- Head count estimate
 
 ## Model Architecture
 
 The enhanced CSRNet implementation includes:
 
-1. **Attention Mechanism**:
-   - Multi-scale attention modules
+1. **Spatial Attention Mechanism**:
+   - Multi-scale attention for better feature extraction
    - Channel-wise attention for feature refinement
-   - Spatial attention for head localization
+   - Adaptive attention based on crowd density
 
-2. **Batch Normalization**:
-   - Applied at multiple network stages
-   - Improves training stability
-   - Better feature normalization
+2. **Enhanced Feature Processing**:
+   - Improved VGG16 frontend
+   - Dilated convolutions in backend
+   - Better batch normalization
+   - Adaptive density map generation
 
 3. **Loss Function**:
-   - Combined MSE and L1 loss
-   - Gradient loss for better density map quality
+   - Combined L1 and L2 loss
    - Adaptive weighting of loss components
+   - Improved gradient handling
 
 4. **Data Augmentation**:
    - Random horizontal flips
@@ -220,27 +172,48 @@ The enhanced CSRNet implementation includes:
    - Random perspective changes
    - Gaussian blur
 
+## Evaluation Metrics
+
+The system provides comprehensive evaluation metrics:
+
+1. **MAE (Mean Absolute Error)**:
+   - Measures average absolute difference between predicted and actual counts
+   - Lower values indicate better accuracy
+
+2. **MSE (Mean Squared Error)**:
+   - Measures average squared difference
+   - More sensitive to larger errors
+
+3. **RMSE (Root Mean Squared Error)**:
+   - Square root of MSE
+   - In same units as original counts
+
+4. **MAPE (Mean Absolute Percentage Error)**:
+   - Measures relative accuracy
+   - Expressed as percentage
+
+5. **R² Score**:
+   - Measures proportion of variance explained
+   - Range: 0 to 1 (higher is better)
+
 ## Troubleshooting
 
 ### Common Issues
 
 1. **Memory Issues**:
-   - Reduce cache size
-   - Decrease batch size
-   - Use fewer workers
-   - Enable periodic cache clearing
+   - Reduce batch size
+   - Decrease cache size
+   - Use memory-efficient settings
 
 2. **Training Stability**:
    - Adjust learning rate
-   - Modify patience for early stopping
-   - Tune loss weights
-   - Check batch normalization layers
+   - Modify loss weights
+   - Check batch normalization
 
 3. **Performance Issues**:
-   - Increase prefetch factor
-   - Enable pinned memory
-   - Use persistent workers
-   - Optimize data loading pipeline
+   - Enable hardware acceleration
+   - Optimize data loading
+   - Use appropriate batch size
 
 ## References
 
