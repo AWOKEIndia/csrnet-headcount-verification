@@ -102,6 +102,11 @@ class CrowdDataset(Dataset):
             # Apply scale factor to preserve the count
             density_map = density_map * scale_factor
 
+            # Verify density map sum is preserved
+            original_sum = np.sum(density_map)
+            if abs(original_sum - np.sum(density_map)) > 0.1:
+                print(f"Warning: Density map sum changed after resize. Original: {original_sum:.2f}, New: {np.sum(density_map):.2f}")
+
         # Convert to tensor
         density_map_tensor = torch.from_numpy(density_map).float().unsqueeze(0)
 

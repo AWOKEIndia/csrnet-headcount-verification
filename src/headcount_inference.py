@@ -86,6 +86,21 @@ def predict_headcount(model, image_path, device, target_size=(384, 384), calibra
     # Apply calibration factor
     predicted_count = raw_count * calibration_factor
 
+    # Resize density map back to original size if needed
+    if original_size != target_size:
+        # Calculate scale factor for preserving count during resize
+        scale_factor = (original_size[0] * original_size[1]) / (target_size[0] * target_size[1])
+
+        # Resize density map
+        density_map = cv2.resize(density_map, original_size, interpolation=cv2.INTER_LINEAR)
+
+        # Apply scale factor to preserve the count
+        density_map = density_map * scale_factor
+
+        # Verify density map sum is preserved
+        if abs(np.sum(density_map) - raw_count) > 0.1:
+            print(f"Warning: Density map sum changed after resize. Original: {raw_count:.2f}, New: {np.sum(density_map):.2f}")
+
     return predicted_count, density_map, original_img
 
 def visualize_prediction(image, density_map, count, output_path=None, display=False):

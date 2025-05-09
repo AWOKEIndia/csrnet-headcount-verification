@@ -149,6 +149,15 @@ def create_density_map_gaussian(points, height, width, sigma=15):
     """
     Generate density map based on head point annotations
     using Gaussian kernels with proper normalization
+
+    Args:
+        points (numpy.ndarray): Array of head point coordinates [x, y]
+        height (int): Height of the output density map
+        width (int): Width of the output density map
+        sigma (int): Sigma for Gaussian kernel
+
+    Returns:
+        numpy.ndarray: Generated density map that integrates to the point count
     """
     density_map = np.zeros((height, width), dtype=np.float32)
 
@@ -160,18 +169,15 @@ def create_density_map_gaussian(points, height, width, sigma=15):
     for point in points:
         x, y = int(point[0]), int(point[1])
         if 0 <= x < width and 0 <= y < height:
-            # Create small Gaussian kernel centered at point
-            # This is more efficient than creating full-size kernels
+            # Create a larger kernel to account for border effects
             kernel_size = max(1, int(sigma * 6)) // 2 * 2 + 1  # Ensure odd size
             kernel_radius = kernel_size // 2
 
-            # Create coordinates for kernel
-            x_left, x_right = max(0, x - kernel_radius), min(width, x + kernel_radius + 1)
-            y_top, y_bottom = max(0, y - kernel_radius), min(height, y + kernel_radius + 1)
-
-            # Get actual kernel dimensions
-            kernel_width = x_right - x_left
-            kernel_height = y_bottom - y_top
+            # Create coordinates for kernel with reflection padding
+            x_left = max(0, x - kernel_radius)
+            x_right = min(width, x + kernel_radius + 1)
+            y_top = max(0, y - kernel_radius)
+            y_bottom = min(height, y + kernel_radius + 1)
 
             # Create coordinate meshgrid for Gaussian
             mesh_x = np.arange(x_left, x_right)
@@ -181,7 +187,17 @@ def create_density_map_gaussian(points, height, width, sigma=15):
             # Generate Gaussian
             gaussian_kernel = np.exp(-((xx - x)**2 + (yy - y)**2) / (2 * sigma**2))
 
-            # Make sure kernel preserves person count (integrate to 1)
+            # Apply reflection padding if needed
+            if x_left == 0:
+                gaussian_kernel = np.pad(gaussian_kernel, ((0, 0), (kernel_radius, 0)), mode='reflect')
+            if x_right == width:
+                gaussian_kernel = np.pad(gaussian_kernel, ((0, 0), (0, kernel_radius)), mode='reflect')
+            if y_top == 0:
+                gaussian_kernel = np.pad(gaussian_kernel, ((kernel_radius, 0), (0, 0)), mode='reflect')
+            if y_bottom == height:
+                gaussian_kernel = np.pad(gaussian_kernel, ((0, kernel_radius), (0, 0)), mode='reflect')
+
+            # Normalize the kernel to sum to 1
             gaussian_kernel = gaussian_kernel / np.sum(gaussian_kernel)
 
             # Add to density map
