@@ -217,9 +217,13 @@ def plot_metrics(metrics_history, save_path):
     """Plot and save training metrics"""
     plt.figure(figsize=(15, 5))
 
+    # Convert tensors to CPU and numpy arrays if needed
+    train_loss = [x.cpu().numpy() if torch.is_tensor(x) else x for x in metrics_history['train_loss']]
+    mae = [x.cpu().numpy() if torch.is_tensor(x) else x for x in metrics_history['mae']]
+
     # Plot losses
     plt.subplot(1, 2, 1)
-    plt.plot(metrics_history['train_loss'], label='Train Loss')
+    plt.plot(train_loss, label='Train Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.title('Training Loss')
@@ -228,7 +232,7 @@ def plot_metrics(metrics_history, save_path):
 
     # Plot MAE
     plt.subplot(1, 2, 2)
-    plt.plot(metrics_history['mae'], label='MAE')
+    plt.plot(mae, label='MAE')
     plt.xlabel('Epoch')
     plt.ylabel('MAE')
     plt.title('Mean Absolute Error')
