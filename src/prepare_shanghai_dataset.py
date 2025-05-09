@@ -10,31 +10,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import scipy.io as sio
 import torch
-import torch.nn.functional as F
 from PIL import Image
-from torchvision import transforms
+from scipy.ndimage.filters import gaussian_filter
 from tqdm import tqdm
 
-
-def get_device():
+def create_density_map(points, height, width, sigma=15):
     """
-    Get the appropriate device for processing
-    Prioritizes Apple Silicon GPU (MPS) if available, then CUDA, then CPU
-    """
-    if torch.backends.mps.is_available():
-        print("Using Apple Silicon GPU (MPS)")
-        return torch.device("mps")
-    elif torch.cuda.is_available():
-        print(f"Using CUDA GPU: {torch.cuda.get_device_name(0)}")
-        return torch.device("cuda")
-    else:
-        print("Using CPU")
-        return torch.device("cpu")
-
-def create_density_map_gaussian(points, height, width, sigma=15):
-    """
-    Generate density map based on head point annotations
-    using Gaussian kernels with proper normalization for headcount
+    Generate density map using basic Gaussian filter
 
     Args:
         points (numpy.ndarray): Array of head point coordinates [x, y]
@@ -43,203 +25,45 @@ def create_density_map_gaussian(points, height, width, sigma=15):
         sigma (int): Sigma for Gaussian kernel
 
     Returns:
-        numpy.ndarray: Generated density map that integrates to the point count
+        numpy.ndarray: Generated density map
     """
+    # Create binary map of points
     density_map = np.zeros((height, width), dtype=np.float32)
 
     # If no points, return empty density map
     if len(points) == 0:
         return density_map
 
-    # Generate density map with fixed sigma
+    # Mark points in the density map
     for point in points:
         x, y = int(point[0]), int(point[1])
         if 0 <= x < width and 0 <= y < height:
-            # Create a larger kernel to account for border effects
-            kernel_size = max(1, int(sigma * 6)) // 2 * 2 + 1  # Ensure odd size
-            kernel_radius = kernel_size // 2
+            density_map[y, x] = 1
 
-            # Create coordinates for kernel with reflection padding
-            x_left = max(0, x - kernel_radius)
-            x_right = min(width, x + kernel_radius + 1)
-            y_top = max(0, y - kernel_radius)
-            y_bottom = min(height, y + kernel_radius + 1)
+    # Apply Gaussian filter
+    density_map = gaussian_filter(density_map, sigma)
 
-            # Create coordinate meshgrid for Gaussian
-            mesh_x = np.arange(x_left, x_right)
-            mesh_y = np.arange(y_top, y_bottom)
-            xx, yy = np.meshgrid(mesh_x, mesh_y)
-
-            # Generate Gaussian
-            gaussian_kernel = np.exp(-((xx - x)**2 + (yy - y)**2) / (2 * sigma**2))
-
-            # Apply reflection padding if needed
-            if x_left == 0:
-                gaussian_kernel = np.pad(gaussian_kernel, ((0, 0), (kernel_radius, 0)), mode='reflect')
-            if x_right == width:
-                gaussian_kernel = np.pad(gaussian_kernel, ((0, 0), (0, kernel_radius)), mode='reflect')
-            if y_top == 0:
-                gaussian_kernel = np.pad(gaussian_kernel, ((kernel_radius, 0), (0, 0)), mode='reflect')
-            if y_bottom == height:
-                gaussian_kernel = np.pad(gaussian_kernel, ((0, kernel_radius), (0, 0)), mode='reflect')
-
-            # Normalize the kernel to sum to 1
-            gaussian_kernel = gaussian_kernel / np.sum(gaussian_kernel)
-
-            # Add to density map
-            density_map[y_top:y_bottom, x_left:x_right] += gaussian_kernel
+    # Normalize to preserve count
+    if np.sum(density_map) > 0:
+        density_map = density_map * (len(points) / np.sum(density_map))
 
     return density_map
 
-def create_density_map_adaptive(points, height, width, k=3):
+def prepare_shanghai_tech(dataset_path, output_path, part='A', visualize=False, target_size=None):
     """
-    Generate density map with adaptive Gaussian kernels
-    based on distances between points
-
-    Args:
-        points (numpy.ndarray): Array of head point coordinates [x, y]
-        height (int): Height of the output density map
-        width (int): Width of the output density map
-        k (int): Number of nearest neighbors to consider
-
-    Returns:
-        numpy.ndarray: Generated density map
-    """
-    density_map = np.zeros((height, width), dtype=np.float32)
-
-    # If no points or too few points, use fixed sigma
-    if len(points) <= k + 1:
-        return create_density_map_gaussian(points, height, width)
-
-    # Calculate average distance to k nearest neighbors for each point
-    from scipy.spatial import KDTree
-    tree = KDTree(points)
-    distances, _ = tree.query(points, k=k+1)  # +1 because first neighbor is the point itself
-
-    # Generate density map with adaptive sigma
-    for i, point in enumerate(points):
-        x, y = int(point[0]), int(point[1])
-        if 0 <= x < width and 0 <= y < height:
-            # Calculate adaptive sigma based on average distance to neighbors
-            # Skip first distance (distance to self is 0)
-            avg_distance = np.mean(distances[i][1:])
-            sigma = max(3, avg_distance * 0.3)  # Lower bound of sigma
-
-            # Calculate kernel size based on sigma (must be odd)
-            kernel_size = max(1, int(sigma * 6)) // 2 * 2 + 1  # Ensure odd size
-            kernel_radius = kernel_size // 2
-
-            # Create coordinates for kernel
-            x_left, x_right = max(0, x - kernel_radius), min(width, x + kernel_radius + 1)
-            y_top, y_bottom = max(0, y - kernel_radius), min(height, y + kernel_radius + 1)
-
-            # Create coordinate meshgrid for Gaussian
-            mesh_x = np.arange(x_left, x_right)
-            mesh_y = np.arange(y_top, y_bottom)
-            xx, yy = np.meshgrid(mesh_x, mesh_y)
-
-            # Generate Gaussian
-            gaussian_kernel = np.exp(-((xx - x)**2 + (yy - y)**2) / (2 * sigma**2))
-
-            # Make sure kernel preserves person count (integrates to 1)
-            gaussian_kernel = gaussian_kernel / np.sum(gaussian_kernel)
-
-            # Add to density map
-            density_map[y_top:y_bottom, x_left:x_right] += gaussian_kernel
-
-    return density_map
-
-def gpu_create_density_map(points, height, width, sigma=15, device=None):
-    """
-    Create density map using GPU acceleration with proper normalization for headcount
-
-    Args:
-        points (numpy.ndarray): Array of head point coordinates [x, y]
-        height (int): Height of the output density map
-        width (int): Width of the output density map
-        sigma (int): Sigma for Gaussian kernel
-        device (torch.device): Device to use for computation
-
-    Returns:
-        numpy.ndarray: Generated density map that integrates to point count
-    """
-    if device is None:
-        device = get_device()
-
-    # If no points, return empty density map
-    if len(points) == 0:
-        return np.zeros((height, width), dtype=np.float32)
-
-    # Convert points to tensor
-    points_tensor = torch.tensor(points, dtype=torch.float32, device=device)
-
-    # Initialize density map
-    density_map = torch.zeros((height, width), device=device)
-
-    # Process points in batches to avoid memory issues
-    batch_size = min(100, len(points))
-
-    for idx in range(0, len(points), batch_size):
-        batch_points = points_tensor[idx:idx + batch_size]
-
-        for point in batch_points:
-            x, y = point[0], point[1]
-
-            if 0 <= x < width and 0 <= y < height:
-                # Calculate kernel region - only generate Gaussian in a local region around each point
-                kernel_size = int(sigma * 6) // 2 * 2 + 1  # Ensure odd size
-                kernel_radius = kernel_size // 2
-
-                # Determine local region bounds
-                x_left = max(0, int(x) - kernel_radius)
-                x_right = min(width, int(x) + kernel_radius + 1)
-                y_top = max(0, int(y) - kernel_radius)
-                y_bottom = min(height, int(y) + kernel_radius + 1)
-
-                # Skip if point is too close to the edge
-                if x_right <= x_left or y_bottom <= y_top:
-                    continue
-
-                # Create local coordinate grid
-                local_h = y_bottom - y_top
-                local_w = x_right - x_left
-
-                y_coords = torch.arange(y_top, y_bottom, device=device).view(-1, 1).expand(-1, local_w)
-                x_coords = torch.arange(x_left, x_right, device=device).view(1, -1).expand(local_h, -1)
-
-                # Generate local Gaussian kernel
-                gaussian = torch.exp(-((x_coords - x)**2 + (y_coords - y)**2) / (2 * sigma**2))
-
-                # Normalize kernel to preserve count
-                if gaussian.sum() > 0:
-                    gaussian = gaussian / gaussian.sum()
-
-                    # Add to density map
-                    density_map[y_top:y_bottom, x_left:x_right] += gaussian
-
-    return density_map.cpu().numpy()
-
-def prepare_shanghai_tech(dataset_path, output_path, part='A', use_adaptive=False, visualize=False, use_gpu=True, target_size=None):
-    """
-    Prepare ShanghaiTech dataset for CSRNet with enhanced density map generation
+    Prepare ShanghaiTech dataset for CSRNet with basic Gaussian filter density map generation
 
     Args:
         dataset_path (str): Path to ShanghaiTech dataset directory
         output_path (str): Path to output processed dataset
         part (str): Dataset part, 'A' or 'B'
-        use_adaptive (bool): Whether to use adaptive Gaussian kernels
         visualize (bool): Whether to visualize density maps
-        use_gpu (bool): Whether to use GPU acceleration if available
         target_size (tuple): Optional target size for resizing images (width, height)
 
     Returns:
         dict: Dataset statistics
     """
     print(f"Preparing ShanghaiTech Part {part} dataset...")
-
-    # Set up device
-    device = get_device() if use_gpu else torch.device('cpu')
-    print(f"Using device: {device}")
 
     # Convert to Path objects for better cross-platform compatibility
     dataset_path = Path(dataset_path)
@@ -368,36 +192,8 @@ def prepare_shanghai_tech(dataset_path, output_path, part='A', use_adaptive=Fals
 
             height, width = target_size[1], target_size[0]
 
-        # Create density map using appropriate method
-        if use_gpu and device.type != 'cpu':
-            # Use adaptive sigma based on crowd density
-            if use_adaptive:
-                sigma = max(4, min(8, len(points) / 150 * 4)) if len(points) > 0 else 4
-            else:
-                sigma = 15  # Default sigma
-
-            # The GPU density map generation could be memory intensive for large images
-            if height * width > 1000000:  # 1M pixels
-                print(f"Warning: Large image size ({height}x{width}) may cause memory issues")
-
-            density_map = gpu_create_density_map(points, height, width, sigma=sigma, device=device)
-        else:
-            if use_adaptive:
-                density_map = create_density_map_adaptive(points, height, width, k=3)
-            else:
-                density_map = create_density_map_gaussian(points, height, width, sigma=15)
-
-        # Verify density map sum is close to people count with smaller tolerance
-        dm_sum = np.sum(density_map)
-        if abs(dm_sum - len(points)) > 0.1:  # Reduced tolerance from 1.0 to 0.1
-            print(f"Warning: Density map sum ({dm_sum:.2f}) does not match people count ({len(points)})")
-            # Rescale density map to match count
-            if dm_sum > 0:
-                density_map = density_map * (len(points) / dm_sum)
-                # Verify the rescaling
-                new_sum = np.sum(density_map)
-                if abs(new_sum - len(points)) > 0.1:
-                    print(f"Warning: Rescaling failed. New sum: {new_sum:.2f}, Expected: {len(points)}")
+        # Create density map using basic Gaussian filter
+        density_map = create_density_map(points, height, width, sigma=15)
 
         # Save image and density map
         try:
@@ -508,36 +304,8 @@ def prepare_shanghai_tech(dataset_path, output_path, part='A', use_adaptive=Fals
 
             height, width = target_size[1], target_size[0]
 
-        # Create density map using appropriate method
-        if use_gpu and device.type != 'cpu':
-            # Use adaptive sigma based on crowd density
-            if use_adaptive:
-                sigma = max(4, min(8, len(points) / 150 * 4)) if len(points) > 0 else 4
-            else:
-                sigma = 15  # Default sigma
-
-            # The GPU density map generation could be memory intensive for large images
-            if height * width > 1000000:  # 1M pixels
-                print(f"Warning: Large image size ({height}x{width}) may cause memory issues")
-
-            density_map = gpu_create_density_map(points, height, width, sigma=sigma, device=device)
-        else:
-            if use_adaptive:
-                density_map = create_density_map_adaptive(points, height, width, k=3)
-            else:
-                density_map = create_density_map_gaussian(points, height, width, sigma=15)
-
-        # Verify density map sum is close to people count with smaller tolerance
-        dm_sum = np.sum(density_map)
-        if abs(dm_sum - len(points)) > 0.1:  # Reduced tolerance from 1.0 to 0.1
-            print(f"Warning: Density map sum ({dm_sum:.2f}) does not match people count ({len(points)})")
-            # Rescale density map to match count
-            if dm_sum > 0:
-                density_map = density_map * (len(points) / dm_sum)
-                # Verify the rescaling
-                new_sum = np.sum(density_map)
-                if abs(new_sum - len(points)) > 0.1:
-                    print(f"Warning: Rescaling failed. New sum: {new_sum:.2f}, Expected: {len(points)}")
+        # Create density map using basic Gaussian filter
+        density_map = create_density_map(points, height, width, sigma=15)
 
         # Save image and density map
         try:
@@ -629,22 +397,16 @@ if __name__ == "__main__":
                         help='Path to output processed dataset')
     parser.add_argument('--part', type=str, default='A', choices=['A', 'B'],
                         help='Dataset part, A or B')
-    parser.add_argument('--adaptive', action='store_true',
-                        help='Use adaptive Gaussian kernels')
     parser.add_argument('--target-size', type=int, nargs=2, default=None,
                         help='Optional target size for resizing images (width height)')
     parser.add_argument('--visualize', action='store_true',
                         help='Visualize density maps')
-    parser.add_argument('--use-gpu', action='store_true', default=True,
-                        help='Use GPU acceleration if available')
     args = parser.parse_args()
 
     prepare_shanghai_tech(
         args.dataset_path,
         args.output_path,
         args.part,
-        args.adaptive,
         args.visualize,
-        args.use_gpu,
         args.target_size
     )

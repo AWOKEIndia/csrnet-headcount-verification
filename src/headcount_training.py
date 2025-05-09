@@ -112,15 +112,52 @@ class CrowdDataset(Dataset):
 
         return img_tensor, density_map_tensor
 
-def train(model, train_loader, optimizer, criterion, device, epoch, print_freq=10):
+class AverageMeter(object):
+    """Computes and stores the average and current value"""
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+
+def adjust_learning_rate(optimizer, epoch, args):
+    """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
+    args.lr = args.original_lr
+
+    for i in range(len(args.steps)):
+        scale = args.scales[i] if i < len(args.scales) else 1
+
+        if epoch >= args.steps[i]:
+            args.lr = args.lr * scale
+            if epoch == args.steps[i]:
+                break
+        else:
+            break
+
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = args.lr
+
+def train(model, train_loader, optimizer, criterion, device, epoch, args):
     """Training function with proper loss calculation"""
     model.train()
-    running_loss = 0.0
+    losses = AverageMeter()
+    batch_time = AverageMeter()
+    data_time = AverageMeter()
 
-    # Use tqdm for progress bar
-    pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
+    end = time.time()
 
-    for i, (imgs, targets) in enumerate(pbar):
+    for i, (imgs, targets) in enumerate(train_loader):
+        data_time.update(time.time() - end)
+
         # Move data to device
         imgs = imgs.to(device)
         targets = targets.to(device)
@@ -131,30 +168,36 @@ def train(model, train_loader, optimizer, criterion, device, epoch, print_freq=1
         # Calculate loss
         loss = criterion(outputs, targets)
 
+        # Update metrics
+        losses.update(loss.item(), imgs.size(0))
+
         # Backward pass
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        # Update running loss
-        running_loss += loss.item()
+        # Update time metrics
+        batch_time.update(time.time() - end)
+        end = time.time()
 
-        # Update progress bar
-        if i % print_freq == 0:
-            avg_loss = running_loss / (i + 1)
-            pbar.set_postfix({'loss': f'{avg_loss:.4f}'})
+        if i % args.print_freq == 0:
+            print('Epoch: [{0}][{1}/{2}]\t'
+                  'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                  'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
+                  'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
+                  .format(
+                   epoch, i, len(train_loader), batch_time=batch_time,
+                   data_time=data_time, loss=losses))
 
-    return running_loss / len(train_loader)
+    return losses.avg
 
 def validate(model, val_loader, criterion, device):
-    """Validation function with MAE and MSE metrics"""
+    """Validation function with MAE metric"""
     model.eval()
     mae = 0
-    mse = 0
-    val_loss = 0
 
     with torch.no_grad():
-        for imgs, targets in tqdm(val_loader, desc="Validation"):
+        for imgs, targets in val_loader:
             # Move data to device
             imgs = imgs.to(device)
             targets = targets.to(device)
@@ -162,55 +205,33 @@ def validate(model, val_loader, criterion, device):
             # Forward pass
             outputs = model(imgs)
 
-            # Calculate loss
-            loss = criterion(outputs, targets)
-            val_loss += loss.item()
+            # Calculate MAE
+            mae += abs(outputs.sum() - targets.sum())
 
-            # Calculate metrics
-            for idx in range(outputs.size(0)):
-                pred_count = outputs[idx].sum().item()
-                gt_count = targets[idx].sum().item()
+    mae = mae / len(val_loader)
+    print(' * MAE {mae:.3f}'.format(mae=mae))
 
-                mae += abs(pred_count - gt_count)
-                mse += (pred_count - gt_count) ** 2
-
-    # Calculate average metrics
-    mae = mae / len(val_loader.dataset)
-    mse = mse / len(val_loader.dataset)
-    rmse = np.sqrt(mse)
-    val_loss = val_loss / len(val_loader)
-
-    return val_loss, mae, rmse
+    return mae
 
 def plot_metrics(metrics_history, save_path):
     """Plot and save training metrics"""
     plt.figure(figsize=(15, 5))
 
     # Plot losses
-    plt.subplot(1, 3, 1)
+    plt.subplot(1, 2, 1)
     plt.plot(metrics_history['train_loss'], label='Train Loss')
-    plt.plot(metrics_history['val_loss'], label='Val Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
-    plt.title('Training and Validation Loss')
+    plt.title('Training Loss')
     plt.legend()
     plt.grid(True)
 
     # Plot MAE
-    plt.subplot(1, 3, 2)
+    plt.subplot(1, 2, 2)
     plt.plot(metrics_history['mae'], label='MAE')
     plt.xlabel('Epoch')
     plt.ylabel('MAE')
     plt.title('Mean Absolute Error')
-    plt.legend()
-    plt.grid(True)
-
-    # Plot RMSE
-    plt.subplot(1, 3, 3)
-    plt.plot(metrics_history['rmse'], label='RMSE')
-    plt.xlabel('Epoch')
-    plt.ylabel('RMSE')
-    plt.title('Root Mean Square Error')
     plt.legend()
     plt.grid(True)
 
@@ -220,19 +241,28 @@ def plot_metrics(metrics_history, save_path):
 
 def main():
     parser = argparse.ArgumentParser(description='Train CSRNet for crowd counting')
-    parser.add_argument('--epochs', type=int, default=100, help='number of epochs')
-    parser.add_argument('--batch_size', type=int, default=8, help='batch size')
-    parser.add_argument('--lr', type=float, default=1e-5, help='learning rate')
+    parser.add_argument('--epochs', type=int, default=400, help='number of epochs')
+    parser.add_argument('--batch_size', type=int, default=1, help='batch size')
+    parser.add_argument('--lr', type=float, default=1e-7, help='initial learning rate')
     parser.add_argument('--data_root', type=str, default='data/processed', help='data root')
     parser.add_argument('--model_path', type=str, default='models/csrnet_improved.pth', help='model save path')
     parser.add_argument('--resume', action='store_true', help='resume from checkpoint')
     parser.add_argument('--seed', type=int, default=42, help='random seed')
+    parser.add_argument('--print_freq', type=int, default=30, help='print frequency')
     args = parser.parse_args()
 
     # Set random seed
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
+
+    # Additional training parameters
+    args.original_lr = args.lr
+    args.momentum = 0.95
+    args.decay = 5e-4
+    args.steps = [-1, 1, 100, 150]
+    args.scales = [1, 1, 1, 1]
+    args.workers = 4
 
     # Create model directory
     os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
@@ -244,9 +274,7 @@ def main():
     # Initialize metrics history
     metrics_history = {
         'train_loss': [],
-        'val_loss': [],
-        'mae': [],
-        'rmse': []
+        'mae': []
     }
 
     # Set device
@@ -257,16 +285,14 @@ def main():
 
     # Resume from checkpoint if needed
     start_epoch = 0
+    best_mae = float('inf')
     if args.resume and os.path.exists(args.model_path):
         print(f"Loading checkpoint from {args.model_path}")
-        model.load_state_dict(torch.load(args.model_path, map_location=device))
-        # Try to load epoch info
-        checkpoint_info_path = os.path.splitext(args.model_path)[0] + '_info.json'
-        if os.path.exists(checkpoint_info_path):
-            with open(checkpoint_info_path, 'r') as f:
-                info = json.load(f)
-                start_epoch = info.get('epoch', 0) + 1
-                print(f"Resuming from epoch {start_epoch}")
+        checkpoint = torch.load(args.model_path, map_location=device)
+        model.load_state_dict(checkpoint['state_dict'])
+        start_epoch = checkpoint.get('epoch', 0) + 1
+        best_mae = checkpoint.get('best_mae', float('inf'))
+        print(f"Resuming from epoch {start_epoch}")
 
     # Create data loaders
     train_dataset = CrowdDataset(
@@ -281,77 +307,51 @@ def main():
         is_train=False
     )
 
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.workers)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers)
 
-    # Define loss function and optimizer
-    # Using MSE loss for regression as primary loss
-    criterion = nn.MSELoss()
+    # Define loss function
+    criterion = nn.MSELoss(size_average=False).to(device)
 
-    # Optionally, you can use a custom loss function with L1 and L2 components
-    # This often gives better results for density map prediction
-    class CombinedLoss(nn.Module):
-        def __init__(self, mse_weight=1.0, l1_weight=0.1):
-            super(CombinedLoss, self).__init__()
-            self.mse_weight = mse_weight
-            self.l1_weight = l1_weight
-
-        def forward(self, pred, target):
-            mse_loss = F.mse_loss(pred, target)
-            l1_loss = F.l1_loss(pred, target)
-            return self.mse_weight * mse_loss + self.l1_weight * l1_loss
-
-    # Use the combined loss
-    criterion = CombinedLoss(mse_weight=1.0, l1_weight=0.1)
-
-    # Define optimizer with weight decay for regularization
-    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
-
-    # Learning rate scheduler
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10)
+    # Define optimizer with SGD
+    optimizer = optim.SGD(model.parameters(), args.lr,
+                         momentum=args.momentum,
+                         weight_decay=args.decay)
 
     # Training loop
-    best_mae = float('inf')
     for epoch in range(start_epoch, args.epochs):
         print(f"\nEpoch {epoch+1}/{args.epochs}")
-        print(f"Learning rate: {optimizer.param_groups[0]['lr']:.6f}")
+        print(f"Learning rate: {optimizer.param_groups[0]['lr']:.10f}")
+
+        # Adjust learning rate
+        adjust_learning_rate(optimizer, epoch, args)
 
         # Train
-        train_loss = train(model, train_loader, optimizer, criterion, device, epoch)
+        train_loss = train(model, train_loader, optimizer, criterion, device, epoch, args)
 
         # Validate
-        val_loss, mae, rmse = validate(model, val_loader, criterion, device)
+        mae = validate(model, val_loader, criterion, device)
 
         # Update metrics history
         metrics_history['train_loss'].append(train_loss)
-        metrics_history['val_loss'].append(val_loss)
         metrics_history['mae'].append(mae)
-        metrics_history['rmse'].append(rmse)
-
-        # Print metrics
-        print(f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-        print(f"MAE: {mae:.2f}, RMSE: {rmse:.2f}")
-
-        # Update learning rate
-        scheduler.step(val_loss)
-
-        # Plot and save metrics every 5 epochs
-        if (epoch + 1) % 5 == 0:
-            plot_metrics(metrics_history, os.path.join(vis_dir, f'metrics_epoch_{epoch+1}.png'))
 
         # Save best model
         if mae < best_mae:
             best_mae = mae
-            torch.save(model.state_dict(), args.model_path)
-            print(f"New best model saved with MAE: {mae:.2f}")
+            torch.save({
+                'epoch': epoch + 1,
+                'state_dict': model.state_dict(),
+                'best_mae': best_mae,
+                'optimizer': optimizer.state_dict(),
+            }, args.model_path)
+            print(f"New best model saved with MAE: {mae:.3f}")
 
             # Save additional info
             info = {
                 'epoch': epoch,
                 'mae': float(mae),
-                'rmse': float(rmse),
                 'train_loss': float(train_loss),
-                'val_loss': float(val_loss),
                 'lr': float(optimizer.param_groups[0]['lr'])
             }
 
