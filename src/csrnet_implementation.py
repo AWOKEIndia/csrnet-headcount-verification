@@ -20,10 +20,17 @@ import psutil
 import gc
 from datetime import datetime
 import json
-from torch.profiler import profile, record_function, ProfilerActivity
 import logging
 import pandas as pd
 from pathlib import Path
+
+# Try importing profiler, but don't fail if not available
+try:
+    from torch.profiler import profile, record_function, ProfilerActivity
+    PROFILER_AVAILABLE = True
+except ImportError:
+    PROFILER_AVAILABLE = False
+    print("Warning: PyTorch profiler not available. Performance monitoring will be limited.")
 
 # Disable SSL certificate verification for downloading pre-trained weights
 ssl._create_default_https_context = ssl._create_unverified_context
@@ -51,13 +58,13 @@ def get_device():
     Prioritizes Apple Silicon GPU (MPS) if available, then CUDA, then CPU
     """
     if torch.backends.mps.is_available():
-        print("Using Apple Silicon GPU (MPS)")
+        logger.info("Using Apple Silicon GPU (MPS)")
         return torch.device("mps")
     elif torch.cuda.is_available():
-        print("Using CUDA GPU")
+        logger.info(f"Using CUDA GPU: {torch.cuda.get_device_name(0)}")
         return torch.device("cuda")
     else:
-        print("Using CPU")
+        logger.info("Using CPU")
         return torch.device("cpu")
 
 class SpatialAttention(nn.Module):
@@ -384,7 +391,7 @@ class PerformanceMonitor:
         self.log_dir = log_dir
         os.makedirs(log_dir, exist_ok=True)
 
-        # Initialize profiler
+        # Initialize profiler if available
         self.profiler = None
         self.profiler_active = False
 
@@ -393,6 +400,9 @@ class PerformanceMonitor:
 
     def _get_profiler_activities(self):
         """Get appropriate profiler activities based on available devices"""
+        if not PROFILER_AVAILABLE:
+            return []
+
         activities = [ProfilerActivity.CPU]
 
         # Check for CUDA (NVIDIA GPU)
@@ -402,14 +412,16 @@ class PerformanceMonitor:
 
         # Check for Metal (Apple Silicon)
         if torch.backends.mps.is_available():
-            # Note: Currently PyTorch profiler doesn't directly support MPS
-            # We'll use CPU profiling for MPS operations
             logger.info("MPS (Metal) device detected - using CPU profiling for MPS operations")
 
         return activities
 
     def start_profiling(self):
         """Start profiling"""
+        if not PROFILER_AVAILABLE:
+            logger.warning("Profiler not available - skipping profiling")
+            return
+
         if not self.profiler_active:
             try:
                 self.profiler = profile(
@@ -442,6 +454,9 @@ class PerformanceMonitor:
 
     def stop_profiling(self):
         """Stop profiling"""
+        if not PROFILER_AVAILABLE:
+            return
+
         if self.profiler_active and self.profiler is not None:
             try:
                 self.profiler.stop()
@@ -526,7 +541,10 @@ def train(model, train_loader, optimizer, epoch, device, monitor):
             target = target.to(device)
 
             # Forward pass
-            with record_function("model_inference"):
+            if PROFILER_AVAILABLE:
+                with record_function("model_inference"):
+                    output = model(img)
+            else:
                 output = model(img)
 
             # Calculate loss with L1 and L2 components
