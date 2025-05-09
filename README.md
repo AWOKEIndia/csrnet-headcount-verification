@@ -8,9 +8,10 @@ The CSRNet Headcount Verification System allows you to:
 
 1. Count people in images with high accuracy
 2. Generate density maps that visualize crowd distribution
-3. Process individual images
+3. Process individual images or batches of images
 4. Automatically utilize the best available hardware (CUDA GPU, Apple Metal, or CPU)
 5. Monitor training progress with detailed logging and metrics
+6. Calibrate model predictions for improved accuracy
 
 ## Key Features
 
@@ -84,7 +85,12 @@ csrnet-headcount-verification/
 ├── models/                       # Saved models directory
 ├── logs/                         # Log files directory
 ├── src/
-│   └── csrnet_implementation.py  # Main implementation file
+│   ├── headcount_solution.py     # Core CSRNet model implementation
+│   ├── headcount_training.py     # Training pipeline
+│   ├── headcount_inference.py    # Inference and visualization
+│   ├── headcount_calibration.py  # Model calibration
+│   ├── prepare_shanghai_dataset.py # Dataset preparation
+│   └── dateset_path_checker.py   # Dataset validation
 └── requirements.txt              # Dependencies file
 ```
 
@@ -93,35 +99,63 @@ csrnet-headcount-verification/
 ### Training the Model
 
 ```bash
-python src/csrnet_implementation.py --train
+python src/headcount_training.py --train
 ```
 
 Optional training parameters:
-- `--model_path`: Path to save the model (default: 'models/csrnet.pth')
+- `--model_path`: Path to save the model (default: 'models/csrnet_improved.pth')
 - `--batch_size`: Batch size for training (default: 8)
-- `--epochs`: Number of training epochs (default: 200)
+- `--epochs`: Number of training epochs (default: 100)
 - `--lr`: Learning rate (default: 1e-5)
+- `--data_root`: Root directory for training data (default: 'data/processed')
+- `--resume`: Resume training from checkpoint
+- `--seed`: Random seed for reproducibility (default: 42)
 
 Example with custom parameters:
 ```bash
-python src/csrnet_implementation.py \
+python src/headcount_training.py \
     --train \
     --model_path models/custom_model.pth \
     --batch_size 16 \
     --epochs 100 \
-    --lr 5e-5
+    --lr 5e-5 \
+    --data_root data/custom_dataset
 ```
 
-### Testing on a Single Image
+### Running Inference
 
 ```bash
-python src/csrnet_implementation.py --test --image_path path/to/image.jpg
+python src/headcount_inference.py --image_path path/to/image.jpg
 ```
 
-The output will include:
-- Original image
-- Predicted density map
-- Head count estimate
+Optional inference parameters:
+- `--model_path`: Path to trained model
+- `--output_dir`: Directory to save results (default: 'results')
+- `--calibration_factor`: Calibration factor for predictions (default: 1.0)
+- `--display`: Display results interactively
+- `--batch`: Process all images in a directory
+
+Example with custom parameters:
+```bash
+python src/headcount_inference.py \
+    --image_path path/to/image.jpg \
+    --model_path models/custom_model.pth \
+    --output_dir results/custom \
+    --calibration_factor 1.2 \
+    --display
+```
+
+### Model Calibration
+
+```bash
+python src/headcount_calibration.py --calibration_data path/to/calibration_data
+```
+
+### Dataset Preparation
+
+```bash
+python src/prepare_shanghai_dataset.py --data_root path/to/raw_data
+```
 
 ## Model Architecture
 
