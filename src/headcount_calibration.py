@@ -170,6 +170,10 @@ def validate_calibration(model, ground_truth_data, calibration_factor, device, t
     """
     errors_before = []
     errors_after = []
+    mae_before = []
+    mae_after = []
+    mse_before = []
+    mse_after = []
     results = []
 
     print(f"Validating calibration factor {calibration_factor:.4f} on {len(ground_truth_data)} images...")
@@ -192,9 +196,15 @@ def validate_calibration(model, ground_truth_data, calibration_factor, device, t
         # Apply calibration
         calibrated_pred = raw_pred * calibration_factor
 
-        # Calculate errors
+        # Calculate percentage errors
         error_before = abs(raw_pred - gt_count) / gt_count * 100
         error_after = abs(calibrated_pred - gt_count) / gt_count * 100
+
+        # Calculate MAE and MSE
+        mae_before.append(abs(raw_pred - gt_count))
+        mae_after.append(abs(calibrated_pred - gt_count))
+        mse_before.append((raw_pred - gt_count) ** 2)
+        mse_after.append((calibrated_pred - gt_count) ** 2)
 
         errors_before.append(error_before)
         errors_after.append(error_after)
@@ -206,7 +216,11 @@ def validate_calibration(model, ground_truth_data, calibration_factor, device, t
             'raw_prediction': raw_pred,
             'calibrated_prediction': calibrated_pred,
             'error_before': error_before,
-            'error_after': error_after
+            'error_after': error_after,
+            'mae_before': abs(raw_pred - gt_count),
+            'mae_after': abs(calibrated_pred - gt_count),
+            'mse_before': (raw_pred - gt_count) ** 2,
+            'mse_after': (calibrated_pred - gt_count) ** 2
         })
 
     if not errors_before:
@@ -221,6 +235,10 @@ def validate_calibration(model, ground_truth_data, calibration_factor, device, t
         'median_error_after': float(np.median(errors_after)),
         'max_error_before': float(np.max(errors_before)),
         'max_error_after': float(np.max(errors_after)),
+        'mae_before': float(np.mean(mae_before)),
+        'mae_after': float(np.mean(mae_after)),
+        'rmse_before': float(np.sqrt(np.mean(mse_before))),
+        'rmse_after': float(np.sqrt(np.mean(mse_after))),
         'improvement': float(np.mean(errors_before) - np.mean(errors_after)),
         'improvement_percentage': float((np.mean(errors_before) - np.mean(errors_after)) / np.mean(errors_before) * 100),
         'calibration_factor': float(calibration_factor),
@@ -512,6 +530,10 @@ def main():
     print(f"Calibration Factor: {calibration_factor:.4f}")
     print(f"Mean Error Before: {stats['mean_error_before']:.2f}%")
     print(f"Mean Error After: {stats['mean_error_after']:.2f}%")
+    print(f"MAE Before: {stats['mae_before']:.2f}")
+    print(f"MAE After: {stats['mae_after']:.2f}")
+    print(f"RMSE Before: {stats['rmse_before']:.2f}")
+    print(f"RMSE After: {stats['rmse_after']:.2f}")
     print(f"Improvement: {improvement:.2f}%")
 
     if improvement > 0:
