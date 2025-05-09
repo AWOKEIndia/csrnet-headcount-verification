@@ -40,6 +40,20 @@ def get_device():
         print("Using CPU")
         return torch.device("cpu")
 
+class AttentionModule(nn.Module):
+    def __init__(self, in_channels):
+        super(AttentionModule, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
+        self.conv2 = nn.Conv2d(in_channels // 8, 1, kernel_size=1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        attention = self.conv1(x)
+        attention = F.relu(attention)
+        attention = self.conv2(attention)
+        attention = self.sigmoid(attention)
+        return x * attention
+
 class CSRNet(nn.Module):
     """
     CSRNet: Dilated Convolutional Neural Networks for Understanding the Highly Congested Scenes
@@ -51,7 +65,18 @@ class CSRNet(nn.Module):
         self.backend_feat = [512, 512, 512, 256, 128, 64]
         self.frontend = self._make_layers(self.frontend_feat)
         self.backend = self._make_layers(self.backend_feat, in_channels=512, dilation=True)
+
+        # Add attention modules
+        self.attention1 = AttentionModule(512)
+        self.attention2 = AttentionModule(256)
+        self.attention3 = AttentionModule(128)
+
         self.output_layer = nn.Conv2d(64, 1, kernel_size=1)
+
+        # Add batch normalization
+        self.bn1 = nn.BatchNorm2d(512)
+        self.bn2 = nn.BatchNorm2d(256)
+        self.bn3 = nn.BatchNorm2d(128)
 
         if load_weights:
             try:
@@ -76,8 +101,17 @@ class CSRNet(nn.Module):
 
     def forward(self, x):
         x = self.frontend(x)
+        x = self.bn1(x)
+        x = self.attention1(x)
+
         x = self.backend(x)
+        x = self.bn2(x)
+        x = self.attention2(x)
+
         x = self.output_layer(x)
+        x = self.bn3(x)
+        x = self.attention3(x)
+
         return x
 
     def _make_layers(self, cfg, in_channels=3, batch_norm=False, dilation=False):
@@ -110,59 +144,100 @@ class CrowdDataset(Dataset):
     """
     Dataset class for crowd counting
     """
-    def __init__(self, image_root, density_map_root, transform=None, target_size=(384, 384)):
+    def __init__(self, image_root, density_map_root, transform=None, target_size=(384, 384), cache_size=1000):
         self.image_root = image_root
         self.density_map_root = density_map_root
         self.transform = transform
         self.target_size = target_size
+        self.cache_size = cache_size
 
+        # Initialize cache
+        self.cache = {}
+        self.cache_keys = []
+
+        # Get all image and density map files
         self.image_files = sorted(glob.glob(os.path.join(image_root, '*.jpg')))
         self.density_map_files = sorted(glob.glob(os.path.join(density_map_root, '*.npy')))
 
-        # Sanity check
+        # Enhanced data augmentation with more variations
+        self.augmentation = transforms.Compose([
+            transforms.RandomHorizontalFlip(),
+            transforms.RandomRotation(15),
+            transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
+            transforms.RandomAffine(degrees=0, translate=(0.2, 0.2), scale=(0.8, 1.2)),
+            transforms.RandomPerspective(distortion_scale=0.3),
+            transforms.RandomApply([transforms.GaussianBlur(kernel_size=3)], p=0.3),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
         assert len(self.image_files) == len(self.density_map_files), "Number of images and density maps don't match!"
+        print(f"Dataset size: {len(self.image_files)} images")
 
-    def __len__(self):
-        return len(self.image_files)
+    def _load_and_cache_item(self, idx):
+        if idx in self.cache:
+            return self.cache[idx]
 
-    def __getitem__(self, idx):
-        # Load and preprocess image
         img = Image.open(self.image_files[idx]).convert('RGB')
         img = img.resize(self.target_size, Image.BILINEAR)
 
-        # Load and preprocess density map
         density_map = np.load(self.density_map_files[idx])
-
-        # Use cubic interpolation for better density map resizing
         density_map = cv2.resize(density_map, self.target_size, interpolation=cv2.INTER_CUBIC)
 
-        # Calculate scale factor for density map normalization
+        # Apply adaptive scaling based on crowd density
         scale_factor = (self.target_size[0] * self.target_size[1]) / (density_map.shape[0] * density_map.shape[1])
         density_map = density_map * scale_factor
 
         if self.transform is not None:
-            img = self.transform(img)
+            img = self.augmentation(img)
 
         density_map = torch.from_numpy(density_map).float().unsqueeze(0)
 
+        # Cache the result
+        if len(self.cache) >= self.cache_size:
+            # Remove oldest item from cache
+            oldest_key = self.cache_keys.pop(0)
+            del self.cache[oldest_key]
+
+        self.cache[idx] = (img, density_map)
+        self.cache_keys.append(idx)
+
         return img, density_map
+
+    def __getitem__(self, idx):
+        return self._load_and_cache_item(idx)
+
+    def __len__(self):
+        return len(self.image_files)
 
 
 def create_density_map_gaussian(points, height, width, sigma=15):
     """
-    Generate density map based on head point annotations
-    using Gaussian kernels
+    Enhanced density map generation with adaptive sigma based on crowd density
     """
     density_map = np.zeros((height, width), dtype=np.float32)
 
+    # Calculate local density
+    local_density = np.zeros((height, width), dtype=np.float32)
     for point in points:
         x, y = int(point[0]), int(point[1])
         if x < width and y < height:
-            # Generate a Gaussian kernel for each point
+            local_density[y, x] += 1
+
+    # Apply Gaussian blur to get density estimate
+    density_estimate = cv2.GaussianBlur(local_density, (15, 15), 0)
+
+    # Generate density map with adaptive sigma
+    for point in points:
+        x, y = int(point[0]), int(point[1])
+        if x < width and y < height:
+            # Adaptive sigma based on local density
+            local_sigma = max(5, min(20, sigma * (1 + density_estimate[y, x])))
+
             gaussian_kernel = np.zeros((height, width), dtype=np.float32)
             gaussian_kernel[y, x] = 1
-            gaussian_kernel = cv2.GaussianBlur(gaussian_kernel, (sigma, sigma), 0)
-            gaussian_kernel = gaussian_kernel / np.sum(gaussian_kernel)  # Normalize
+            gaussian_kernel = cv2.GaussianBlur(gaussian_kernel, (int(local_sigma), int(local_sigma)), 0)
+            gaussian_kernel = gaussian_kernel / np.sum(gaussian_kernel)
 
             density_map += gaussian_kernel
 
@@ -282,7 +357,7 @@ class PerformanceMonitor:
 
 def train(model, train_loader, optimizer, epoch, device, monitor):
     """
-    Training function with performance monitoring
+    Enhanced training function with improved loss calculation
     """
     model.train()
     train_loss = 0
@@ -297,18 +372,34 @@ def train(model, train_loader, optimizer, epoch, device, monitor):
         with record_function("model_forward"):
             output = model(data)
 
-        # Ensure output and target have the same size
         if output.size() != target.size():
             output = F.interpolate(output, size=target.size()[2:], mode='bilinear', align_corners=False)
 
-        # MSE Loss
-        loss = F.mse_loss(output, target)
+        # Combined loss function
+        mse_loss = F.mse_loss(output, target)
+
+        # Add L1 loss for better count accuracy
+        l1_loss = F.l1_loss(output, target)
+
+        # Add gradient loss for better density map quality
+        gradient_loss = torch.mean(torch.abs(
+            torch.diff(output, dim=2) - torch.diff(target, dim=2)
+        )) + torch.mean(torch.abs(
+            torch.diff(output, dim=3) - torch.diff(target, dim=3)
+        ))
+
+        # Combine losses with weights
+        loss = mse_loss + 0.5 * l1_loss + 0.1 * gradient_loss
+
         loss.backward()
+
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
         optimizer.step()
 
         train_loss += loss.item()
 
-        # Record batch time
         batch_time = time.time() - batch_start
         monitor.log_batch_time(batch_time)
 
@@ -357,7 +448,7 @@ def validate(model, val_loader, device):
 
 def predict(model, image_path, device):
     """
-    Make prediction on a single image
+    Enhanced prediction function with post-processing
     """
     transform = transforms.Compose([
         transforms.ToTensor(),
@@ -371,21 +462,35 @@ def predict(model, image_path, device):
     with torch.no_grad():
         output = model(img_tensor)
 
-    # Get the predicted count
-    count = output.sum().item()
-
-    # Visualize the result
+    # Post-processing
     output_np = output.squeeze().cpu().numpy()
 
-    plt.figure(figsize=(12, 6))
-    plt.subplot(1, 2, 1)
+    # Apply Gaussian smoothing to reduce noise
+    output_np = cv2.GaussianBlur(output_np, (5, 5), 0)
+
+    # Apply adaptive thresholding
+    threshold = np.mean(output_np) + 2 * np.std(output_np)
+    output_np[output_np < threshold] = 0
+
+    # Get the predicted count with confidence
+    count = np.sum(output_np)
+    confidence = np.mean(output_np[output_np > 0]) if np.any(output_np > 0) else 0
+
+    # Visualization
+    plt.figure(figsize=(15, 5))
+
+    plt.subplot(1, 3, 1)
     plt.imshow(np.array(img))
     plt.title('Original Image')
 
-    plt.subplot(1, 2, 2)
+    plt.subplot(1, 3, 2)
     plt.imshow(output_np, cmap='jet')
-    plt.title(f'Predicted Density Map (Count: {count:.2f})')
+    plt.title(f'Density Map (Count: {count:.2f})')
     plt.colorbar()
+
+    plt.subplot(1, 3, 3)
+    plt.imshow(output_np > threshold, cmap='gray')
+    plt.title(f'Detected Heads (Confidence: {confidence:.2f})')
 
     plt.tight_layout()
     plt.savefig('prediction_result.png')
@@ -410,6 +515,11 @@ def main():
     parser.add_argument('--image-size', type=int, default=384, help='input image size (default: 384)')
     parser.add_argument('--num-workers', type=int, default=4, help='number of workers for data loading (default: 4)')
     parser.add_argument('--profile', action='store_true', help='enable PyTorch profiler')
+    parser.add_argument('--cache-size', type=int, default=1000, help='number of images to cache in memory')
+    parser.add_argument('--prefetch-factor', type=int, default=2, help='number of batches to prefetch')
+    parser.add_argument('--pin-memory', action='store_true', default=True, help='pin memory in data loader')
+    parser.add_argument('--persistent-workers', action='store_true', default=True, help='use persistent workers')
+    parser.add_argument('--patience', type=int, default=10, help='patience for early stopping')
     args = parser.parse_args()
 
     # Set device
@@ -443,13 +553,14 @@ def main():
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
-        # Create datasets with consistent image size
+        # Create datasets with consistent image size and caching
         target_size = (args.image_size, args.image_size)
         train_dataset = CrowdDataset(
             os.path.join(args.data_path, 'train', 'images'),
             os.path.join(args.data_path, 'train', 'density_maps'),
             transform=transform,
-            target_size=target_size
+            target_size=target_size,
+            cache_size=args.cache_size
         )
 
         val_dataset = CrowdDataset(
@@ -460,17 +571,20 @@ def main():
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
             ]),
-            target_size=target_size
+            target_size=target_size,
+            cache_size=args.cache_size
         )
 
-        # Create data loaders with appropriate number of workers
+        # Create data loaders with optimized settings
         train_loader = DataLoader(
             train_dataset,
             batch_size=args.batch_size,
             shuffle=True,
             num_workers=args.num_workers,
-            pin_memory=True if device.type != 'mps' else False,
-            persistent_workers=True if args.num_workers > 0 else False
+            pin_memory=args.pin_memory,
+            persistent_workers=args.persistent_workers,
+            prefetch_factor=args.prefetch_factor,
+            drop_last=True  # Drop last incomplete batch
         )
 
         val_loader = DataLoader(
@@ -478,23 +592,41 @@ def main():
             batch_size=args.batch_size,
             shuffle=False,
             num_workers=args.num_workers,
-            pin_memory=True if device.type != 'mps' else False,
-            persistent_workers=True if args.num_workers > 0 else False
+            pin_memory=args.pin_memory,
+            persistent_workers=args.persistent_workers,
+            prefetch_factor=args.prefetch_factor
         )
 
-        # Optimizer with gradient clipping
-        optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=5
+        # Optimizer with gradient clipping and learning rate scheduling
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=args.lr,
+            epochs=args.epochs,
+            steps_per_epoch=len(train_loader),
+            pct_start=0.3,
+            anneal_strategy='cos'
         )
-        max_grad_norm = 1.0
 
+        # Initialize early stopping variables
         best_mae = float('inf')
-        patience = 10
         patience_counter = 0
+        patience = args.patience
 
-        # Training loop with profiling
+        # Training loop with improved memory management
         for epoch in range(1, args.epochs + 1):
+            # Clear cache periodically
+            if epoch % 5 == 0:
+                train_dataset.cache.clear()
+                train_dataset.cache_keys.clear()
+                val_dataset.cache.clear()
+                val_dataset.cache_keys.clear()
+                gc.collect()
+                if device.type == 'cuda':
+                    torch.cuda.empty_cache()
+                elif device.type == 'mps':
+                    torch.mps.empty_cache()
+
             if args.profile and epoch == 1:
                 with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
                            schedule=torch.profiler.schedule(wait=1, warmup=1, active=3),
@@ -510,7 +642,7 @@ def main():
                 val_loss, mae = validate(model, val_loader, device)
 
             # Update learning rate
-            scheduler.step(val_loss)
+            scheduler.step()
 
             # Update metrics
             monitor.update_metrics(train_loss=train_loss, val_loss=val_loss, mae=mae)
@@ -519,14 +651,16 @@ def main():
             monitor.save_metrics(epoch)
             monitor.plot_metrics(epoch)
 
-            # Save the best model
-            if mae < best_mae and args.save_model:
+            # Early stopping check
+            if mae < best_mae:
                 best_mae = mae
-                torch.save(model.state_dict(), 'csrnet_best.pth')
-                print(f"Saved best model with MAE: {best_mae:.2f}")
+                if args.save_model:
+                    torch.save(model.state_dict(), 'csrnet_best.pth')
+                    print(f"Saved best model with MAE: {best_mae:.2f}")
                 patience_counter = 0
             else:
                 patience_counter += 1
+                print(f"No improvement for {patience_counter} epochs. Best MAE: {best_mae:.2f}")
 
             # Early stopping
             if patience_counter >= patience:
