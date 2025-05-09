@@ -13,6 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from PIL import Image
+from scipy.ndimage import gaussian_filter
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 from tqdm import tqdm
@@ -55,7 +56,7 @@ class CrowdDataset(Dataset):
         self.density_map_files = []
         for image_file in self.image_files:
             image_id = os.path.splitext(os.path.basename(image_file))[0]
-            density_map_file = os.path.join(density_map_root, f"{image_id}.npy")
+            density_map_file = os.path.join(self.density_map_root, f"{image_id}.npy")
             if os.path.exists(density_map_file):
                 self.density_map_files.append(density_map_file)
             else:
@@ -101,6 +102,9 @@ class CrowdDataset(Dataset):
 
             # Apply scale factor to preserve the count
             density_map = density_map * scale_factor
+
+            # Apply Gaussian smoothing to the resized density map
+            density_map = gaussian_filter(density_map, sigma=1.0)
 
             # Verify density map sum is preserved
             original_sum = np.sum(density_map)

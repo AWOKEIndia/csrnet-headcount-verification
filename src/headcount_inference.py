@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from PIL import Image
+from scipy.ndimage import gaussian_filter
 from torchvision import transforms
 from tqdm import tqdm
 
@@ -82,6 +83,9 @@ def predict_headcount(model, image_path, device, target_size=(384, 384), calibra
 
     # Clamp density map to non-negative values
     density_map = np.clip(density_map, 0, None)
+
+    # Apply Gaussian smoothing to the density map
+    density_map = gaussian_filter(density_map, sigma=1.0)
 
     # Calculate predicted count (sum of density map)
     raw_count = float(np.sum(density_map))
@@ -333,7 +337,20 @@ def load_model(model_path, device=None):
     # Load weights
     if os.path.exists(model_path):
         print(f"Loading model weights from {model_path}")
-        model.load_state_dict(torch.load(model_path, map_location=device))
+        checkpoint = torch.load(model_path, map_location=device)
+
+        # Handle different checkpoint formats
+        if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+            # If checkpoint is a dictionary with 'state_dict' key
+            state_dict = checkpoint['state_dict']
+            print(f"Loaded checkpoint from epoch {checkpoint.get('epoch', 'unknown')}")
+            print(f"Best MAE: {checkpoint.get('best_mae', 'unknown')}")
+        else:
+            # If checkpoint is directly the state dict
+            state_dict = checkpoint
+
+        # Load the state dict
+        model.load_state_dict(state_dict)
     else:
         print(f"Warning: Model weights not found at {model_path}")
         print("Using ImageNet pre-trained weights only")

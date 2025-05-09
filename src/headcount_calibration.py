@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
+from scipy.ndimage import gaussian_filter
 from tqdm import tqdm
 
 # Import inference modules
@@ -186,12 +187,16 @@ def validate_calibration(model, ground_truth_data, calibration_factor, device, t
             continue
 
         # Get raw prediction
-        raw_pred, _, _ = predict_headcount(
+        raw_pred, density_map, _ = predict_headcount(
             model, image_path, device, target_size, calibration_factor=1.0
         )
 
         if raw_pred is None:
             continue
+
+        # Apply Gaussian smoothing to the density map
+        density_map = gaussian_filter(density_map, sigma=1.0)
+        raw_pred = float(np.sum(density_map))
 
         # Apply calibration
         calibrated_pred = raw_pred * calibration_factor
