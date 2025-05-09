@@ -39,18 +39,37 @@ ssl._create_default_https_context = ssl._create_unverified_context
 def setup_logger(name, log_file, level=logging.INFO):
     """Setup logger with proper formatting"""
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    handler = logging.FileHandler(log_file)
-    handler.setFormatter(formatter)
+
+    # File handler
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setFormatter(formatter)
+
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
 
     logger = logging.getLogger(name)
     logger.setLevel(level)
-    logger.addHandler(handler)
+
+    # Remove existing handlers to avoid duplicates
+    logger.handlers = []
+
+    # Add both handlers
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
 
     return logger
 
 # Create logs directory if it doesn't exist
 os.makedirs('logs', exist_ok=True)
 logger = setup_logger('csrnet', 'logs/csrnet.log')
+
+# Add initial log message
+logger.info("CSRNet implementation started")
+logger.info(f"Python version: {platform.python_version()}")
+logger.info(f"PyTorch version: {torch.__version__}")
+logger.info(f"CUDA available: {torch.cuda.is_available()}")
+logger.info(f"MPS available: {torch.backends.mps.is_available()}")
 
 def get_device():
     """
@@ -657,34 +676,56 @@ def main():
     parser.add_argument('--lr', type=float, default=1e-5, help='learning rate')
     args = parser.parse_args()
 
+    logger.info("Starting CSRNet with arguments:")
+    logger.info(f"Train mode: {args.train}")
+    logger.info(f"Test mode: {args.test}")
+    logger.info(f"Model path: {args.model_path}")
+    logger.info(f"Batch size: {args.batch_size}")
+    logger.info(f"Epochs: {args.epochs}")
+    logger.info(f"Learning rate: {args.lr}")
+
     device = get_device()
     logger.info(f"Using device: {device}")
 
     if args.train:
+        logger.info("Starting training process...")
         # Create models directory if it doesn't exist
         os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
+        logger.info(f"Created/verified models directory at {os.path.dirname(args.model_path)}")
 
         # Training setup
+        logger.info("Initializing model...")
         model = CSRNet(load_weights=True).to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
         monitor = PerformanceMonitor()
+        logger.info("Model initialized successfully")
 
         # Create data loaders
-        train_dataset = CrowdDataset('data/processed/train/images', 'data/processed/train/density_maps')
-        val_dataset = CrowdDataset('data/processed/val/images', 'data/processed/val/density_maps')
+        logger.info("Setting up data loaders...")
+        try:
+            train_dataset = CrowdDataset('data/processed/train/images', 'data/processed/train/density_maps')
+            val_dataset = CrowdDataset('data/processed/val/images', 'data/processed/val/density_maps')
+            logger.info(f"Found {len(train_dataset)} training images and {len(val_dataset)} validation images")
+        except Exception as e:
+            logger.error(f"Error loading datasets: {str(e)}")
+            raise
 
         train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
         val_loader = DataLoader(val_dataset, batch_size=args.batch_size)
+        logger.info("Data loaders created successfully")
 
         # Training loop
+        logger.info("Starting training loop...")
         best_mae = float('inf')
         for epoch in range(args.epochs):
             logger.info(f"\nEpoch {epoch+1}/{args.epochs}")
 
             # Training phase
+            logger.info("Starting training phase...")
             train_loss = train(model, train_loader, optimizer, epoch, device, monitor)
 
             # Validation phase
+            logger.info("Starting validation phase...")
             mae, rmse = validate(model, val_loader, device)
 
             # Update metrics
@@ -701,13 +742,32 @@ def main():
             monitor.log_performance(epoch)
 
     elif args.test and args.image_path:
+        logger.info("Starting testing process...")
+        if not os.path.exists(args.image_path):
+            logger.error(f"Test image not found at {args.image_path}")
+            raise FileNotFoundError(f"Test image not found at {args.image_path}")
+
+        if not os.path.exists(args.model_path):
+            logger.error(f"Model not found at {args.model_path}")
+            raise FileNotFoundError(f"Model not found at {args.model_path}")
+
         # Load model and make prediction
+        logger.info("Loading model...")
         model = CSRNet().to(device)
         model.load_state_dict(torch.load(args.model_path, map_location=device))
+        logger.info("Model loaded successfully")
 
+        logger.info("Making prediction...")
         density_map, count, fig = predict(model, args.image_path, device)
         plt.show()
         logger.info(f'Predicted count: {count:.2f}')
+    else:
+        logger.error("Invalid arguments. Use --train for training or --test with --image_path for testing.")
+        raise ValueError("Invalid arguments. Use --train for training or --test with --image_path for testing.")
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception as e:
+        logger.error(f"An error occurred: {str(e)}", exc_info=True)
+        raise

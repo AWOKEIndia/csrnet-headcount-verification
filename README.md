@@ -6,12 +6,11 @@ This project implements a headcount verification system based on CSRNet (Congest
 
 The CSRNet Headcount Verification System allows you to:
 
-1. Count people in images and videos with high accuracy
+1. Count people in images with high accuracy
 2. Generate density maps that visualize crowd distribution
-3. Process individual images, video files, webcam feeds, or RTSP streams
-4. Batch process multiple images
-5. Use a convenient GUI interface for all functionality
-6. Automatically utilize the best available hardware (CUDA GPU, Apple Metal, or CPU)
+3. Process individual images
+4. Automatically utilize the best available hardware (CUDA GPU, Apple Metal, or CPU)
+5. Monitor training progress with detailed logging and metrics
 
 ## Key Features
 
@@ -25,9 +24,9 @@ The CSRNet Headcount Verification System allows you to:
 - **Advanced Training Features**:
   - Combined L1 and L2 loss for better accuracy
   - Adaptive learning rate scheduling
-  - Early stopping with configurable patience
   - Memory-efficient training pipeline
   - In-memory dataset caching
+  - Comprehensive performance monitoring
 
 - **Optimized Data Processing**:
   - Efficient data loading with prefetching
@@ -36,15 +35,15 @@ The CSRNet Headcount Verification System allows you to:
   - Improved preprocessing pipeline
 
 - **Comprehensive Evaluation**:
-  - Multiple evaluation metrics (MAE, MSE, RMSE, MAPE, R²)
+  - Multiple evaluation metrics (MAE, MSE, RMSE)
   - Detailed visualization of results
-  - Error analysis and distribution plots
-  - Performance monitoring
+  - Performance monitoring and logging
+  - Memory usage tracking
 
 ## Requirements
 
 - Python 3.6+
-- PyTorch 1.7+
+- PyTorch 2.0+
 - Hardware Support:
   - NVIDIA GPU with CUDA support (recommended for best performance)
   - Apple Silicon (M1/M2/M3) with Metal support
@@ -70,31 +69,23 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-4. Download the Shanghai CSRNet Dataset:
-   - Visit the [ShanghaiTech Dataset](https://www.cv-foundation.org/openaccess/content_cvpr_2016/papers/Zhang_Single-Image_Crowd_Counting_CVPR_2016_paper.pdf)
-   - Download both Part A and Part B datasets
-   - Extract the datasets to your project directory
-
 ## File Structure
 
 ```
-├── src/
-│   ├── csrnet_implementation.py   # Enhanced CSRNet model implementation
-│   ├── model_evaluation.py        # Model evaluation and metrics
-│   ├── video_processing.py        # Video and stream processing
-│   ├── gui_application.py         # Graphical user interface
-│   └── prepare_shanghai_dataset.py # Dataset preparation script
-├── data/                         # Dataset directory
-│   ├── train/                    # Training data
-│   │   ├── images/              # Training images
-│   │   └── density_maps/        # Training density maps
-│   └── val/                      # Validation data
-│       ├── images/              # Validation images
-│       └── density_maps/        # Validation density maps
+csrnet-headcount-verification/
+├── data/
+│   ├── processed/
+│   │   ├── train/
+│   │   │   ├── images/
+│   │   │   └── density_maps/
+│   │   └── val/
+│   │       ├── images/
+│   │       └── density_maps/
 ├── models/                       # Saved models directory
 ├── logs/                         # Log files directory
-├── evaluation_results/          # Evaluation results directory
-└── README.md                    # This file
+├── src/
+│   └── csrnet_implementation.py  # Main implementation file
+└── requirements.txt              # Dependencies file
 ```
 
 ## Usage
@@ -102,41 +93,29 @@ pip install -r requirements.txt
 ### Training the Model
 
 ```bash
-python src/csrnet_implementation.py \
-    --train \
-    --model_path models/csrnet.pth \
-    --batch_size 8 \
-    --epochs 200 \
-    --lr 1e-5
+python src/csrnet_implementation.py --train
 ```
 
-Key training parameters:
+Optional training parameters:
+- `--model_path`: Path to save the model (default: 'models/csrnet.pth')
 - `--batch_size`: Batch size for training (default: 8)
 - `--epochs`: Number of training epochs (default: 200)
 - `--lr`: Learning rate (default: 1e-5)
 
-### Evaluating the Model
-
+Example with custom parameters:
 ```bash
-python src/model_evaluation.py \
-    --model_path models/csrnet.pth \
-    --test_dir data/test \
-    --output_dir evaluation_results
+python src/csrnet_implementation.py \
+    --train \
+    --model_path models/custom_model.pth \
+    --batch_size 16 \
+    --epochs 100 \
+    --lr 5e-5
 ```
 
-The evaluation will generate:
-- Detailed metrics (MAE, MSE, RMSE, MAPE, R²)
-- Error distribution plots
-- Prediction vs ground truth scatter plots
-- Individual image results
-
-### Processing a Single Image
+### Testing on a Single Image
 
 ```bash
-python src/model_evaluation.py \
-    --model_path models/csrnet.pth \
-    --image_path path/to/image.jpg \
-    --output_dir evaluation_results
+python src/csrnet_implementation.py --test --image_path path/to/image.jpg
 ```
 
 The output will include:
@@ -172,29 +151,27 @@ The enhanced CSRNet implementation includes:
    - Random perspective changes
    - Gaussian blur
 
-## Evaluation Metrics
+## Performance Monitoring
 
-The system provides comprehensive evaluation metrics:
+The system includes comprehensive performance monitoring:
 
-1. **MAE (Mean Absolute Error)**:
-   - Measures average absolute difference between predicted and actual counts
-   - Lower values indicate better accuracy
+1. **Training Metrics**:
+   - Loss values (training and validation)
+   - MAE (Mean Absolute Error)
+   - RMSE (Root Mean Squared Error)
+   - Learning rate tracking
 
-2. **MSE (Mean Squared Error)**:
-   - Measures average squared difference
-   - More sensitive to larger errors
+2. **System Metrics**:
+   - Memory usage
+   - Batch processing time
+   - Epoch completion time
+   - Device utilization
 
-3. **RMSE (Root Mean Squared Error)**:
-   - Square root of MSE
-   - In same units as original counts
-
-4. **MAPE (Mean Absolute Percentage Error)**:
-   - Measures relative accuracy
-   - Expressed as percentage
-
-5. **R² Score**:
-   - Measures proportion of variance explained
-   - Range: 0 to 1 (higher is better)
+3. **Logging**:
+   - Detailed console output
+   - Log file generation
+   - Performance metrics visualization
+   - Error tracking and debugging
 
 ## Troubleshooting
 
@@ -215,10 +192,14 @@ The system provides comprehensive evaluation metrics:
    - Optimize data loading
    - Use appropriate batch size
 
+4. **Logging Issues**:
+   - Check logs directory permissions
+   - Verify console output settings
+   - Monitor log file size
+
 ## References
 
 - [CSRNet: Dilated Convolutional Neural Networks for Understanding the Highly Congested Scenes](https://arxiv.org/abs/1802.10062)
-- [ShanghaiTech Dataset](https://www.cv-foundation.org/openaccess/content_cvpr_2016/papers/Zhang_Single-Image_Crowd_Counting_CVPR_2016_paper.pdf)
 - [PyTorch](https://pytorch.org/)
 
 ## License
